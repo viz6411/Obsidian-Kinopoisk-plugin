@@ -1,11 +1,12 @@
 import {
+  App,
+  Modal,
+  Notice,
   Plugin,
   PluginSettingTab,
-  SettingTab,
-  App,
-  Notice,
+  Setting,
   TFile,
-  moment
+  parseYaml,
 } from "obsidian";
 
 // --- API types ---
@@ -72,15 +73,18 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   autoCache: true,
 };
 
-// --- Cache helper ---
+// --- Cache helpers ---
 
-async function getCache(settings: KinopoiskPluginSettings, vault: any, key: string): Promise<string | null> {
+async function getCache(
+  settings: KinopoiskPluginSettings,
+  app: App,
+  key: string
+): Promise<any> {
   const cachePath = `${settings.cacheDir}/${key}.json`;
   try {
-    const file = vault.getFiles().find((f: TFile) => f.path === cachePath);
-    if (file) {
-      const content = await vault.adapter.read(file.path);
-      return content;
+    if (await app.vault.adapter.exists(cachePath)) {
+      const content = await app.vault.adapter.read(cachePath);
+      return JSON.parse(content);
     }
   } catch (e) {
     // cache miss is ok
@@ -88,47 +92,65 @@ async function getCache(settings: KinopoiskPluginSettings, vault: any, key: stri
   return null;
 }
 
-async function setCache(settings: KinopoiskPluginSettings, vault: any, key: string, data: any): Promise<void> {
+async function setCache(
+  settings: KinopoiskPluginSettings,
+  app: App,
+  key: string,
+  data: any
+): Promise<void> {
   try {
     const cachePath = `${settings.cacheDir}/${key}.json`;
     // Ensure cache dir exists
-    const cacheDirExists = vault.getFiles().some((f: TFile) => f.path.startsWith(settings.cacheDir));
-    if (!cacheDirExists) {
-      await vault.adapter.mkdir(settings.cacheDir);
+    const dir = settings.cacheDir;
+    if (!(await app.vault.adapter.exists(dir + "/"))) {
+      try {
+        await app.vault.adapter.mkdir(dir);
+      } catch (e) {
+        // dir may already exist, that's fine
+      }
     }
-    await vault.adapter.write(cachePath, JSON.stringify(data, null, 2));
+    await app.vault.adapter.write(cachePath, JSON.stringify(data, null, 2));
   } catch (e) {
     console.error("Cache write error:", e);
   }
 }
 
-// --- API helper ---
+// --- API helper with graceful error handling ---
 
 async function kinopoiskRequest(
   settings: KinopoiskPluginSettings,
   endpoint: string,
   signal?: AbortSignal
 ): Promise<any> {
-  const keys = [settings.apiKey, settings.apiKey2, settings.apiKey3].filter((k) => k.trim());
-  
+  const keys = [settings.apiKey, settings.apiKey2, settings.apiKey3].filter(
+    (k) => k.trim()
+  );
+
   if (keys.length === 0) {
-    throw new Error("No Kinopoisk API key configured. Please add one in plugin settings.");
+    throw new Error(
+      "No Kinopoisk API key configured. Please add one in plugin settings (Settings → Kinopoisk Plugin → API Key)."
+    );
   }
 
   let lastError: any = null;
-  
+
   for (const key of keys) {
     try {
-      const response = await fetch(`https://kinopoiskapiunofficial.tech${endpoint}`, {
-        headers: {
-          "X-API-KEY": key.trim(),
-        },
-        signal,
-      });
+      const response = await fetch(
+        `https://kinopoiskapiunofficial.tech${endpoint}`,
+        {
+          headers: {
+            "X-API-KEY": key.trim(),
+          },
+          signal,
+        }
+      );
 
       if (response.status === 402 || response.status === 403) {
         // Quota exhausted for this key, try next
-        console.warn(`Kinopoisk quota exhausted for key ${key.slice(0, 4)}...`);
+        console.warn(
+          `Kinopoisk quota exhausted for key ${key.slice(0, 4)}...`
+        );
         continue;
       }
 
@@ -143,54 +165,133 @@ async function kinopoiskRequest(
       if (e.name === "AbortError") {
         throw e;
       }
-      console.warn(`Kinopoisk request failed with key ${key.slice(0, 4)}...`, e.message);
+      console.warn(
+        `Kinopoisk request failed with key ${key.slice(0, 4)}...`,
+        e.message
+      );
     }
   }
 
-  throw new Error(`All Kinopoisk API keys exhausted. ${lastError?.message || ""}`);
+  // Graceful error handling: show clear message with instructions
+  const errorMessage = lastError?.message || "Unknown error";
+  const instructions =
+    "Please check:\n" +
+    "1. Your internet connection\n" +
+    "2. That the Kinopoisk API is available (kinopoiskapiunofficial.tech)\n" +
+    "3. That your API key is valid and has remaining quota\n" +
+    "4. Try again in a few minutes";
+
+  console.error("Kinopoisk API request failed:", errorMessage);
+  throw new Error(
+    `Failed to connect to Kinopoisk API: ${errorMessage}\n\n${instructions}`
+  );
 }
 
 // --- Frontmatter helpers ---
 
-function parseFrontmatter(content: string): { frontmatter: string; body: string; data: Record<string, any> } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  
-  if (match) {
-    const frontmatterStr = match[1];
-    const body = match[2];
-    const data: Record<string, any> = {};
-    
-    frontmatterStr.split("\n").forEach((line) => {
-      const idx = line.indexOf(":");
-      if (idx > 0) {
-        const key = line.substring(0, idx).trim();
-        const val = line.substring(idx + 1).trim();
-        data[key] = val;
-      }
-    });
-    
-    return { frontmatter: `---\n${frontmatterStr}\n---`, body, data };
-  }
-  
-  return { frontmatter: "", body: content, data: {} };
+interface ParsedNote {
+  frontmatter: Record<string, any>;
+  body: string;
 }
 
-function updateFrontmatter(
-  frontmatter: string,
-  body: string,
-  updates: Record<string, string>
-): string {
-  if (!frontmatter) {
-    // Create new frontmatter
-    const lines = Object.entries(updates).map(([k, v]) => `${k}: ${v}`);
-    return `---\n${lines.join("\n")}\n---\n${body}`;
+function parseNote(content: string): ParsedNote {
+  // Use Obsidian's built-in frontmatter parsing
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (match) {
+    let frontmatter: Record<string, any> = {};
+    try {
+      frontmatter = parseYaml(match[1]) || {};
+    } catch (e) {
+      console.warn("Failed to parse frontmatter YAML:", e);
+    }
+    return { frontmatter, body: match[2] };
   }
-  
-  const parsed = parseFrontmatter(frontmatter);
-  const data = { ...parsed.data, ...updates };
-  
-  const lines = Object.entries(data).map(([k, v]) => `${k}: ${v}`);
-  return `---\n${lines.join("\n")}\n---\n${body}`;
+  return { frontmatter: {}, body: content };
+}
+
+function serializeFrontmatter(data: Record<string, any>): string {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (value === null || value === undefined) continue;
+    const str = String(value);
+    // Quote strings that contain special characters
+    if (
+      str === "" ||
+      str.includes(":") ||
+      str.includes("#") ||
+      str.includes("\n") ||
+      str.startsWith(" ") ||
+      str.startsWith('"')
+    ) {
+      const escaped = str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      lines.push(`${key}: "${escaped}"`);
+    } else {
+      lines.push(`${key}: ${str}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function rebuildNote(original: string, updates: Record<string, any>): string {
+  const { frontmatter, body } = parseNote(original);
+  const merged = { ...frontmatter, ...updates };
+  const fmStr = serializeFrontmatter(merged);
+  return `---\n${fmStr}\n---\n${body}`;
+}
+
+// --- Film Selection Modal ---
+
+class FilmSelectionModal extends Modal {
+  films: FilmSearchResult[];
+  onSelect: (film: FilmSearchResult) => void;
+
+  constructor(
+    app: App,
+    films: FilmSearchResult[],
+    onSelect: (film: FilmSearchResult) => void
+  ) {
+    super(app);
+    this.films = films;
+    this.onSelect = onSelect;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Select a film" });
+
+    this.films.forEach((film) => {
+      const item = contentEl.createEl("div", { cls: "film-selection-item" });
+      item.style.margin = "10px 0";
+      item.style.padding = "10px";
+      item.style.border = "1px solid var(--background-modifier-border)";
+      item.style.borderRadius = "6px";
+      item.style.cursor = "pointer";
+
+      const title = item.createEl("div", {
+        text: `${film.nameRu} (${film.year})`,
+      });
+      title.style.fontWeight = "600";
+      title.style.marginBottom = "5px";
+
+      if (film.description) {
+        const desc = item.createEl("div", { text: film.description });
+        desc.style.fontSize = "14px";
+        desc.style.color = "var(--text-muted)";
+        desc.style.maxHeight = "60px";
+        desc.style.overflow = "hidden";
+      }
+
+      item.onclick = () => {
+        this.onSelect(film);
+        this.close();
+      };
+    });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 // --- Plugin ---
@@ -237,30 +338,28 @@ export default class KinopoiskPlugin extends Plugin {
   }
 
   async enrichCurrentFile(): Promise<void> {
-    const file = this.app.vault.getActiveFile();
+    const file = this.app.workspace.getActiveFile();
     if (!file) {
       new Notice("No active file. Open a film note first.");
       return;
     }
 
-    // Check if it's a film note
-    const content = await this.app.vault.readAdapter.read(file.path);
-    const { data } = parseFrontmatter(content);
-    
-    if (data.type !== "film") {
+    const content = await this.app.vault.read(file);
+    const { frontmatter } = parseNote(content);
+
+    if (frontmatter.type !== "film") {
       new Notice("This is not a film note (type != film).");
       return;
     }
 
     // Get film name from file name
     const filmName = file.basename;
-    
+
     new Notice(`Searching Kinopoisk for "${filmName}"...`);
-    
+
     try {
-      // Search
-      const searchResult = await kinopoiskRequest(this.settings, `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(filmName)}&page=1`);
-      
+      const searchResult = await this.searchFilms(filmName);
+
       if (!searchResult.films || searchResult.films.length === 0) {
         new Notice(`No films found for "${filmName}".`);
         return;
@@ -268,98 +367,160 @@ export default class KinopoiskPlugin extends Plugin {
 
       // Find best match (prefer exact name match)
       let bestFilm = searchResult.films[0];
+      let foundExactMatch = false;
+
       for (const film of searchResult.films) {
         if (film.nameRu.toLowerCase() === filmName.toLowerCase()) {
           bestFilm = film;
+          foundExactMatch = true;
           break;
         }
       }
 
-      new Notice(`Found: "${bestFilm.nameRu}" (${bestFilm.year}). Getting details...`);
-
-      // Get details
-      const detail = await kinopoiskRequest(this.settings, `/api/v2.2/films/${bestFilm.filmId}`);
-
-      // Update frontmatter
-      const updates: Record<string, string> = {};
-      
-      if (detail.webUrl) {
-        updates.kinopoisk = detail.webUrl;
-      }
-      
-      if (detail.ratingKinopoisk) {
-        updates.kp_rating = detail.ratingKinopoisk;
-      }
-      
-      if (detail.description) {
-        // Escape backslashes and quotes for YAML
-        const desc = detail.description.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-        updates.description = `"${desc}"`;
-      }
-      
-      // Download poster
-      if (detail.posterUrl) {
-        const posterPath = `${this.settings.posterDir}/${bestFilm.filmId}.jpg`;
-        await this.downloadPoster(detail.posterUrl, posterPath);
-        updates.poster = `[[${posterPath}]]`;
+      // If no exact match and multiple results, show selection modal
+      if (!foundExactMatch && searchResult.films.length > 1) {
+        const modal = new FilmSelectionModal(
+          this.app,
+          searchResult.films,
+          (film) => {
+            // User selected a film from the modal
+            this.processFilmSelection(film, file, filmName);
+          }
+        );
+        modal.open();
+        return;
       }
 
-      // Cache the result
-      await setCache(this.settings, this.app.vault, `film-${bestFilm.filmId}`, detail);
-
-      // Write updates
-      const fullContent = await this.app.vault.readAdapter.read(file.path);
-      const { frontmatter, body } = parseFrontmatter(fullContent);
-      const newContent = updateFrontmatter(frontmatter, body, updates);
-      
-      await this.app.vault.readAdapter.write(file.path, newContent);
-      
-      new Notice(`✅ Updated "${filmName}" with Kinopoisk data.`);
+      // If exact match or only one result, process directly
+      await this.processFilmSelection(bestFilm, file, filmName);
     } catch (e: any) {
-      new Notice(`❌ Error: ${e.message}`);
+      // Graceful error handling
+      new Notice(`❌ ${e.message}`, 10000);
       console.error("Kinopoisk enrichment error:", e);
     }
   }
 
-  async enrichAllFilms(): Promise<void> {
-    const films = this.app.vault.getFiles().filter((f) => {
-      if (f.extension !== "md") return false;
-      // Read content to check type
-      try {
-        const content = this.app.vault.readAdapter.read(f.path);
-        const { data } = parseFrontmatter(content);
-        return data === "film";
-      } catch {
-        return false;
-      }
-    });
+  async searchFilms(keyword: string): Promise<SearchResult> {
+    const endpoint = `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(
+      keyword
+    )}&page=1`;
+    return kinopoiskRequest(this.settings, endpoint);
+  }
 
-    if (films.length === 0) {
-      new Notice("No film notes found.");
+  async processFilmSelection(
+    film: FilmSearchResult,
+    file: TFile,
+    filmName: string
+  ): Promise<void> {
+    try {
+      new Notice(
+        `Processing: "${film.nameRu}" (${film.year}). Getting details...`
+      );
+
+      // Check cache first
+      let detail = await getCache(this.settings, this.app, `film-${film.filmId}`);
+
+      if (!detail) {
+        detail = await kinopoiskRequest(
+          this.settings,
+          `/api/v2.2/films/${film.filmId}`
+        );
+        await setCache(this.settings, this.app, `film-${film.filmId}`, detail);
+      }
+
+      // Build updates
+      const updates: Record<string, any> = {};
+
+      if (detail.webUrl) {
+        updates.kinopoisk = detail.webUrl;
+      }
+
+      if (detail.ratingKinopoisk) {
+        updates.kp_rating = detail.ratingKinopoisk;
+      }
+
+      if (detail.description) {
+        updates.description = detail.description;
+      }
+
+      // Download poster
+      if (detail.posterUrl) {
+        const posterPath = `${this.settings.posterDir}/${film.filmId}.jpg`;
+        await this.downloadPoster(detail.posterUrl, posterPath);
+        updates.poster = `[[${posterPath}]]`;
+      }
+
+      // Write updates
+      const original = await this.app.vault.read(file);
+      const newContent = rebuildNote(original, updates);
+      await this.app.vault.process(file, () => newContent);
+
+      new Notice(`✅ Updated "${filmName}" with Kinopoisk data.`);
+    } catch (e: any) {
+      // Graceful error handling
+      new Notice(`❌ ${e.message}`, 10000);
+      console.error("Film selection processing error:", e);
+    }
+  }
+
+  async enrichAllFilms(): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+
+    if (files.length === 0) {
+      new Notice("No markdown files found.");
       return;
     }
 
-    new Notice(`Found ${films.length} film notes. Starting enrichment...`);
+    // Filter to film notes only
+    const filmFiles: TFile[] = [];
+    for (const file of files) {
+      try {
+        const content = await this.app.vault.read(file);
+        const { frontmatter } = parseNote(content);
+        if (frontmatter.type === "film") {
+          filmFiles.push(file);
+        }
+      } catch (e) {
+        // skip unreadable files
+      }
+    }
+
+    if (filmFiles.length === 0) {
+      new Notice("No film notes found (type: film).");
+      return;
+    }
+
+    new Notice(
+      `Found ${filmFiles.length} film notes. Starting enrichment...`
+    );
 
     let success = 0;
     let skipped = 0;
     let failed = 0;
 
-    for (const file of films) {
+    for (const file of filmFiles) {
       try {
-        // Check if already has kinopoisk link
-        const content = await this.app.vault.readAdapter.read(file.path);
-        const { data } = parseFrontmatter(content);
-        
-        if (data.kinopoisk) {
+        const content = await this.app.vault.read(file);
+        const { frontmatter } = parseNote(content);
+
+        if (frontmatter.kinopoisk) {
           skipped++;
           continue;
         }
 
-        // Enrich this file
-        await this.enrichSingleFile(file);
+        const filmName = file.basename;
+        const searchResult = await this.searchFilms(filmName);
+
+        if (!searchResult.films || searchResult.films.length === 0) {
+          failed++;
+          continue;
+        }
+
+        // In batch mode, take the first result (no modal)
+        const bestFilm = searchResult.films[0];
+        await this.processFilmSelection(bestFilm, file, filmName);
         success++;
-        
+
         // Small delay to avoid rate limiting
         await new Promise((resolve) => setTimeout(resolve, 500));
       } catch (e: any) {
@@ -368,12 +529,9 @@ export default class KinopoiskPlugin extends Plugin {
       }
     }
 
-    new Notice(`✅ Done: ${success} enriched, ${skipped} skipped, ${failed} failed.`);
-  }
-
-  async enrichSingleFile(file: TFile): Promise<void> {
-    // Similar to enrichCurrentFile but takes a TFile parameter
-    // Implementation omitted for brevity - refactor as needed
+    new Notice(
+      `✅ Done: ${success} enriched, ${skipped} skipped, ${failed} failed.`
+    );
   }
 
   async checkQuota(): Promise<void> {
@@ -383,14 +541,19 @@ export default class KinopoiskPlugin extends Plugin {
     }
 
     try {
-      const quota = await kinopoiskRequest(this.settings, `/api/v1/api_keys/${this.settings.apiKey}`);
-      
+      const quota = await kinopoiskRequest(
+        this.settings,
+        `/api/v1/api_keys/${this.settings.apiKey}`
+      );
+
       const remaining = quota.limit - quota.requestCount;
       new Notice(
         `Kinopoisk quota: ${quota.requestCount}/${quota.limit} used, ${remaining} remaining. Resets: ${quota.resetDateTime}`
       );
     } catch (e: any) {
-      new Notice(`❌ Quota check failed: ${e.message}`);
+      // Graceful error handling
+      new Notice(`❌ ${e.message}`, 10000);
+      console.error("Quota check error:", e);
     }
   }
 
@@ -398,8 +561,12 @@ export default class KinopoiskPlugin extends Plugin {
     try {
       // Ensure directory exists
       const dir = destPath.split("/").slice(0, -1).join("/");
-      if (dir && !this.app.vault.getFiles().some((f) => f.path.startsWith(dir))) {
-        await this.app.vault.readAdapter.mkdir(dir);
+      if (dir && !(await this.app.vault.adapter.exists(dir + "/"))) {
+        try {
+          await this.app.vault.adapter.mkdir(dir);
+        } catch (e) {
+          // dir may already exist, that's fine
+        }
       }
 
       const response = await fetch(url);
@@ -408,16 +575,18 @@ export default class KinopoiskPlugin extends Plugin {
       }
 
       const buffer = await response.arrayBuffer();
-      await this.app.vault.readAdapter.writeBinary(destPath, new Uint8Array(buffer));
+      await this.app.vault.adapter.writeBinary(destPath, buffer);
     } catch (e: any) {
+      // Graceful error handling
       console.warn("Poster download failed:", e.message);
+      new Notice(`⚠️ Poster download failed: ${e.message}`, 8000);
     }
   }
 }
 
 // --- Settings Tab ---
 
-class KinopoiskSettingsTab extends SettingTab {
+class KinopoiskSettingsTab extends PluginSettingTab {
   plugin: KinopoiskPlugin;
 
   constructor(app: App, plugin: KinopoiskPlugin) {
@@ -431,9 +600,12 @@ class KinopoiskSettingsTab extends SettingTab {
 
     new Setting(containerEl)
       .setName("Kinopoisk API Key")
-      .setDesc("Your Kinopoisk Unofficial API key (from kinopoiskapiunofficial.tech). Required.")
+      .setDesc(
+        "Your Kinopoisk Unofficial API key (from kinopoiskapiunofficial.tech). Required."
+      )
       .addText((text) => {
-        text.setPlaceholder("your-api-key")
+        text
+          .setPlaceholder("your-api-key")
           .setValue(this.plugin.settings.apiKey)
           .onChange(async (value) => {
             this.plugin.settings.apiKey = value;
@@ -445,7 +617,8 @@ class KinopoiskSettingsTab extends SettingTab {
       .setName("Secondary API Key")
       .setDesc("Optional secondary key for rotation.")
       .addText((text) => {
-        text.setPlaceholder("secondary-key")
+        text
+          .setPlaceholder("secondary-key")
           .setValue(this.plugin.settings.apiKey2)
           .onChange(async (value) => {
             this.plugin.settings.apiKey2 = value;
@@ -457,7 +630,8 @@ class KinopoiskSettingsTab extends SettingTab {
       .setName("Tertiary API Key")
       .setDesc("Optional tertiary key for rotation.")
       .addText((text) => {
-        text.setPlaceholder("tertiary-key")
+        text
+          .setPlaceholder("tertiary-key")
           .setValue(this.plugin.settings.apiKey3)
           .onChange(async (value) => {
             this.plugin.settings.apiKey3 = value;
@@ -469,7 +643,8 @@ class KinopoiskSettingsTab extends SettingTab {
       .setName("Poster directory")
       .setDesc("Directory for downloaded posters (relative to vault root).")
       .addText((text) => {
-        text.setPlaceholder("Films_posters")
+        text
+          .setPlaceholder("Films_posters")
           .setValue(this.plugin.settings.posterDir)
           .onChange(async (value) => {
             this.plugin.settings.posterDir = value;
@@ -481,7 +656,8 @@ class KinopoiskSettingsTab extends SettingTab {
       .setName("Cache directory")
       .setDesc("Directory for API cache (relative to vault root).")
       .addText((text) => {
-        text.setPlaceholder(".kinopoisk-cache")
+        text
+          .setPlaceholder(".kinopoisk-cache")
           .setValue(this.plugin.settings.cacheDir)
           .onChange(async (value) => {
             this.plugin.settings.cacheDir = value;
