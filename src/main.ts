@@ -818,7 +818,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
         .addExtraButton((btn) => {
           btn
             .setTooltip("Remove key")
-            .setButtonText("Remove")
+            .setIcon("trash")
             .onClick(async () => {
               this.plugin.settings.apiKeys.splice(index, 1);
               await this.plugin.saveData(this.plugin.settings);
