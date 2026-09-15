@@ -230,18 +230,21 @@ function serializeFrontmatter(data: Record<string, any>): string {
       continue;
     }
     const str = String(value);
+    // Obsidian's frontmatter parser chokes on multi-line double-quoted values
+    // (renders the property as red/broken). Flatten newlines to spaces so
+    // every key stays on a single line.
+    const flat = str.includes("\n") ? str.replace(/\n+/g, " ") : str;
     if (
-      str === "" ||
-      str.includes(":") ||
-      str.includes("#") ||
-      str.includes("\n") ||
-      str.startsWith(" ") ||
-      str.startsWith('"')
+      flat === "" ||
+      flat.includes(":") ||
+      flat.includes("#") ||
+      flat.startsWith(" ") ||
+      flat.startsWith('"')
     ) {
-      const escaped = str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const escaped = flat.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       lines.push(`${key}: "${escaped}"`);
     } else {
-      lines.push(`${key}: ${str}`);
+      lines.push(`${key}: ${flat}`);
     }
   }
   return lines.join("\n");
