@@ -724,11 +724,14 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // --- API Keys (dynamic list) ---
 
-    new Setting(containerEl)
-      .setName("Kinopoisk API Keys")
-      .setDesc(
-        "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403)."
-      );
+    const apiKeyHeader = containerEl.createEl("h3");
+    apiKeyHeader.setText("Kinopoisk API Keys");
+    const apiKeyDesc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403).",
+    });
+    apiKeyDesc.style.marginTop = "-4px";
 
     this.apiKeysContainer = containerEl.createDiv({
       cls: "kinopoisk-api-keys",
@@ -737,11 +740,14 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // --- Data Mapping ---
 
-    new Setting(containerEl)
-      .setName("Data Mapping")
-      .setDesc(
-        "Select which API fields to map to note properties. For each field, choose the property name."
-      );
+    const dataMappingHeader = containerEl.createEl("h3");
+    dataMappingHeader.setText("Data Mapping");
+    const dataMappingDesc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Select which API fields to map to note properties. For each field, choose the property name.",
+    });
+    dataMappingDesc.style.marginTop = "-4px";
 
     this.mappingContainer = containerEl.createDiv({
       cls: "kinopoisk-mapping",
