@@ -230,21 +230,34 @@ function serializeFrontmatter(data: Record<string, any>): string {
       continue;
     }
     const str = String(value);
-    // Obsidian's frontmatter parser chokes on multi-line double-quoted values
-    // (renders the property as red/broken). Flatten newlines to spaces so
-    // every key stays on a single line.
-    const flat = str.includes("\n") ? str.replace(/\n+/g, " ") : str;
+    // Multi-line values (e.g. a description with paragraphs) are written as a
+    // YAML literal block scalar — the exact format Obsidian writes when you
+    // press Shift+Enter in the properties panel:
+    //   description: |-
+    //     line one
+    //
+    //     line two
+    // Obsidian's frontmatter parser renders a multi-line double-quoted value
+    // as red/broken, so real newlines must never live inside a quoted scalar.
+    if (str.includes("\n")) {
+      const trimmed = str.replace(/\n+$/, "");
+      lines.push(`${key}: |-`);
+      for (const line of trimmed.split("\n")) {
+        lines.push(line === "" ? "" : `  ${line}`);
+      }
+      continue;
+    }
     if (
-      flat === "" ||
-      flat.includes(":") ||
-      flat.includes("#") ||
-      flat.startsWith(" ") ||
-      flat.startsWith('"')
+      str === "" ||
+      str.includes(":") ||
+      str.includes("#") ||
+      str.startsWith(" ") ||
+      str.startsWith('"')
     ) {
-      const escaped = flat.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const escaped = str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       lines.push(`${key}: "${escaped}"`);
     } else {
-      lines.push(`${key}: ${flat}`);
+      lines.push(`${key}: ${str}`);
     }
   }
   return lines.join("\n");
