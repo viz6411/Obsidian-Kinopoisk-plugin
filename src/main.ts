@@ -224,7 +224,11 @@ function parseNote(content: string): ParsedNote {
 function serializeFrontmatter(data: Record<string, any>): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(data)) {
-    if (value === null || value === undefined) continue;
+    // Preserve empty properties (e.g. "rating:") instead of dropping them.
+    if (value === null || value === undefined) {
+      lines.push(`${key}:`);
+      continue;
+    }
     const str = String(value);
     if (
       str === "" ||
