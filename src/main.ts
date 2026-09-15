@@ -83,6 +83,8 @@ interface KinopoiskPluginSettings {
   overwriteExisting: boolean;
   missingProperty: "add" | "ignore";
   checkUpdatesOnStartup: boolean;
+  filmNoteProperty: string;
+  filmNoteValue: string;
 }
 
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
@@ -99,6 +101,8 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   overwriteExisting: true,
   missingProperty: "add",
   checkUpdatesOnStartup: true,
+  filmNoteProperty: "type",
+  filmNoteValue: "film",
 };
 
 // --- Update check ---
@@ -356,6 +360,10 @@ class PropertySuggest extends AbstractInputSuggest<string> {
     this.props = props;
   }
 
+  setProps(props: string[]): void {
+    this.props = props;
+  }
+
   getSuggestions(query: string): string[] {
     if (!query || query.trim() === "") return this.props;
     const q = query.trim().toLowerCase();
@@ -478,6 +486,16 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
+  // --- Film note detection (configurable) ---
+
+  isFilmNote(frontmatter: Record<string, any>): boolean {
+    const prop = (this.settings.filmNoteProperty || "").trim();
+    if (prop === "") return false;
+    if (!(prop in frontmatter)) return false;
+    const actual = frontmatter[prop];
+    return String(actual).toLowerCase() === this.settings.filmNoteValue.toLowerCase();
+  }
+
   // --- Enrich current file ---
 
   async enrichCurrentFile(): Promise<void> {
@@ -490,8 +508,10 @@ export default class KinopoiskPlugin extends Plugin {
     const content = await this.app.vault.read(file);
     const { frontmatter } = parseNote(content);
 
-    if (frontmatter.type !== "film") {
-      new Notice("This is not a film note (type != film).");
+    if (!this.isFilmNote(frontmatter)) {
+      new Notice(
+        `This is not a film note (property "${this.settings.filmNoteProperty}" != "${this.settings.filmNoteValue}").`
+      );
       return;
     }
 
@@ -611,6 +631,12 @@ export default class KinopoiskPlugin extends Plugin {
 
   // --- Enrich all films ---
 
+  /** Property used to mark a note as already enriched (mapped webUrl, fallback "kinopoisk"). */
+  private enrichedMarkerProperty(): string {
+    const mapped = (this.settings.mapping.webUrl || "").trim();
+    return mapped !== "" ? mapped : "kinopoisk";
+  }
+
   async enrichAllFilms(): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
 
@@ -624,7 +650,7 @@ export default class KinopoiskPlugin extends Plugin {
       try {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
-        if (frontmatter.type === "film") {
+        if (this.isFilmNote(frontmatter)) {
           filmFiles.push(file);
         }
       } catch (e) {
@@ -633,13 +659,15 @@ export default class KinopoiskPlugin extends Plugin {
     }
 
     if (filmFiles.length === 0) {
-      new Notice("No film notes found (type: film).");
+      new Notice(`No film notes found (${this.settings.filmNoteProperty} == "${this.settings.filmNoteValue}").`);
       return;
     }
 
     new Notice(
       `Found ${filmFiles.length} film notes. Starting enrichment...`
     );
+
+    const markerProp = this.enrichedMarkerProperty();
 
     let success = 0;
     let skipped = 0;
@@ -650,7 +678,7 @@ export default class KinopoiskPlugin extends Plugin {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
 
-        if (frontmatter.kinopoisk) {
+        if (frontmatter[markerProp]) {
           skipped++;
           continue;
         }
@@ -757,7 +785,7 @@ export default class KinopoiskPlugin extends Plugin {
       try {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
-        if (frontmatter.type === "film") {
+        if (this.isFilmNote(frontmatter)) {
           for (const key of Object.keys(frontmatter)) {
             props.add(key);
           }
@@ -777,6 +805,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
   plugin: KinopoiskPlugin;
   private apiKeysContainer: HTMLElement | null = null;
   private mappingContainer: HTMLElement | null = null;
+  private actionContainer: HTMLElement | null = null;
   private mappedProps: string[] = [];
 
   constructor(app: App, plugin: KinopoiskPlugin) {
@@ -822,6 +851,59 @@ class KinopoiskSettingsTab extends PluginSettingTab {
             await this.plugin.saveData(this.plugin.settings);
           });
       });
+
+    // --- Film note detection ---
+
+    const filmNoteHeader = containerEl.createEl("h3");
+    filmNoteHeader.setText("Film note detection");
+    const filmNoteDesc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "A note is treated as a film note if it has the property below and its value equals the expected value (case-insensitive).",
+    });
+    filmNoteDesc.style.marginTop = "-4px";
+
+    new Setting(containerEl)
+      .setName("Property name")
+      .setDesc("Frontmatter property used to detect film notes (e.g. type).")
+      .addText((text) => {
+        text
+          .setPlaceholder("type")
+          .setValue(this.plugin.settings.filmNoteProperty)
+          .onChange(async (value) => {
+            this.plugin.settings.filmNoteProperty = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderActions();
+          });
+        const suggest = new PropertySuggest(this.app, text.inputEl, []);
+        this.plugin
+          .collectPropertyNames()
+          .then((props) => suggest.setProps(props))
+          .catch(() => {
+            /* empty suggest list is acceptable */
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Expected value")
+      .setDesc("Value the property must equal for the note to count as a film (e.g. film).")
+      .addText((text) => {
+        text
+          .setPlaceholder("film")
+          .setValue(this.plugin.settings.filmNoteValue)
+          .onChange(async (value) => {
+            this.plugin.settings.filmNoteValue = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderActions();
+          });
+      });
+
+    // --- Bulk actions ---
+
+    const actionsHeader = containerEl.createEl("h3");
+    actionsHeader.setText("Actions");
+    this.actionContainer = containerEl.createDiv({});
+    this.renderActions();
 
     // --- API Keys (dynamic list) ---
 
@@ -912,6 +994,46 @@ class KinopoiskSettingsTab extends PluginSettingTab {
             await this.plugin.saveData(this.plugin.settings);
           });
       });
+  }
+
+  // --- Render actions (bulk buttons, visibility depends on detection settings) ---
+
+  private renderActions(): void {
+    if (!this.actionContainer) return;
+    const container = this.actionContainer;
+    container.empty();
+
+    const prop = (this.plugin.settings.filmNoteProperty || "").trim();
+    const val = this.plugin.settings.filmNoteValue || "";
+    const detectionConfigured = prop !== "";
+
+    if (!detectionConfigured) {
+      container.createEl("div", {
+        cls: "text-muted",
+        text: 'Actions are disabled until "Film note detection" is configured (property name must not be empty).',
+      });
+    } else {
+      new Setting(container)
+        .setName("Enrich all film notes")
+        .setDesc(
+          `Search Kinopoisk and enrich every note where "${prop}" == "${val}" (skips notes that already have the mapped Kinopoisk URL property).`
+        )
+        .addButton((btn) => {
+          btn
+            .setButtonText("Enrich all")
+            .setCta()
+            .onClick(async () => {
+              btn.setDisabled(true);
+              btn.setButtonText("Enriching…");
+              try {
+                await this.plugin.enrichAllFilms();
+              } finally {
+                btn.setButtonText("Enrich all");
+                btn.setDisabled(false);
+              }
+            });
+        });
+    }
   }
 
   // --- Render dynamic API keys list ---
