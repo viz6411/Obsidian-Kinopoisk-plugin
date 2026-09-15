@@ -1,4 +1,5 @@
 import {
+  AbstractInputSuggest,
   App,
   Modal,
   Notice,
@@ -7,35 +8,28 @@ import {
   Setting,
   TFile,
   parseYaml,
+  requestUrl,
 } from "obsidian";
 
 // --- API types ---
 
-interface FilmSearchResult {
+interface FilmInfo {
   filmId: string;
   nameRu: string;
   nameEn: string;
   year: number;
   type: string;
   description: string;
+  shortDescription: string;
+  slogan: string;
   filmLength: string;
   posterUrl: string;
+  webUrl: string;
   ratingKinopoisk: string;
   ratingVoteCount: string;
-  countries: string[];
-  genres: string[];
-}
-
-interface FilmDetail {
-  filmId: string;
-  webUrl: string;
-  description: string;
-  shortDescription: string;
-  ratingKinopoisk: string;
   ratingImdb: string;
-  posterUrl: string;
-  nameRu: string;
-  year: number;
+  ratingFilmCritics: string;
+  ratingMpaa: string;
   countries: string[];
   genres: string[];
 }
@@ -43,7 +37,7 @@ interface FilmDetail {
 interface SearchResult {
   pagesCount: number;
   searchFilmsCountResult: number;
-  films: FilmSearchResult[];
+  films: FilmInfo[];
 }
 
 interface QuotaInfo {
@@ -53,24 +47,56 @@ interface QuotaInfo {
   resetDateTime: string;
 }
 
-// --- Settings ---
+// --- Field mapping ---
+
+interface ApiFieldDef {
+  id: string;
+  label: string;
+}
+
+const API_FIELDS: ApiFieldDef[] = [
+  { id: "webUrl", label: "Kinopoisk URL" },
+  { id: "nameRu", label: "Name (RU)" },
+  { id: "nameEn", label: "Name (EN)" },
+  { id: "year", label: "Year" },
+  { id: "type", label: "Type" },
+  { id: "filmLength", label: "Duration" },
+  { id: "ratingKinopoisk", label: "Rating (Kinopoisk)" },
+  { id: "ratingVoteCount", label: "Votes count" },
+  { id: "ratingImdb", label: "Rating (IMDb)" },
+  { id: "ratingFilmCritics", label: "Rating (Film critics)" },
+  { id: "ratingMpaa", label: "Age rating (MPAA)" },
+  { id: "description", label: "Description" },
+  { id: "shortDescription", label: "Short description" },
+  { id: "slogan", label: "Slogan" },
+  { id: "countries", label: "Countries" },
+  { id: "genres", label: "Genres" },
+  { id: "posterUrl", label: "Poster" },
+];
 
 interface KinopoiskPluginSettings {
-  apiKey: string;
-  apiKey2: string;
-  apiKey3: string;
+  apiKeys: string[];
   posterDir: string;
   cacheDir: string;
   autoCache: boolean;
+  mapping: Record<string, string>;
+  overwriteExisting: boolean;
+  missingProperty: "add" | "ignore";
 }
 
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
-  apiKey: "",
-  apiKey2: "",
-  apiKey3: "",
+  apiKeys: [],
   posterDir: "Films_posters",
   cacheDir: ".kinopoisk-cache",
   autoCache: true,
+  mapping: {
+    webUrl: "kinopoisk",
+    ratingKinopoisk: "kp_rating",
+    description: "description",
+    posterUrl: "poster",
+  },
+  overwriteExisting: true,
+  missingProperty: "add",
 };
 
 // --- Cache helpers ---
@@ -100,13 +126,12 @@ async function setCache(
 ): Promise<void> {
   try {
     const cachePath = `${settings.cacheDir}/${key}.json`;
-    // Ensure cache dir exists
     const dir = settings.cacheDir;
     if (!(await app.vault.adapter.exists(dir + "/"))) {
       try {
         await app.vault.adapter.mkdir(dir);
       } catch (e) {
-        // dir may already exist, that's fine
+        // dir may already exist
       }
     }
     await app.vault.adapter.write(cachePath, JSON.stringify(data, null, 2));
@@ -119,16 +144,13 @@ async function setCache(
 
 async function kinopoiskRequest(
   settings: KinopoiskPluginSettings,
-  endpoint: string,
-  signal?: AbortSignal
+  endpoint: string
 ): Promise<any> {
-  const keys = [settings.apiKey, settings.apiKey2, settings.apiKey3].filter(
-    (k) => k.trim()
-  );
+  const keys = settings.apiKeys.map((k) => k.trim()).filter((k) => k !== "");
 
   if (keys.length === 0) {
     throw new Error(
-      "No Kinopoisk API key configured. Please add one in plugin settings (Settings → Kinopoisk Plugin → API Key)."
+      "No Kinopoisk API key configured. Please add one in plugin settings (Settings → Kinopoisk Plugin → API Keys)."
     );
   }
 
@@ -136,35 +158,27 @@ async function kinopoiskRequest(
 
   for (const key of keys) {
     try {
-      const response = await fetch(
-        `https://kinopoiskapiunofficial.tech${endpoint}`,
-        {
-          headers: {
-            "X-API-KEY": key.trim(),
-          },
-          signal,
-        }
-      );
+      const response = await requestUrl({
+        url: `https://kinopoiskapiunofficial.tech${endpoint}`,
+        method: "GET",
+        headers: { "X-API-KEY": key },
+        throw: false,
+      });
 
       if (response.status === 402 || response.status === 403) {
-        // Quota exhausted for this key, try next
         console.warn(
           `Kinopoisk quota exhausted for key ${key.slice(0, 4)}...`
         );
         continue;
       }
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+      if (response.status >= 400) {
+        throw new Error(`API error: ${response.status} ${endpoint}`);
       }
 
-      const data = await response.json();
-      return data;
+      return response.json;
     } catch (e: any) {
       lastError = e;
-      if (e.name === "AbortError") {
-        throw e;
-      }
       console.warn(
         `Kinopoisk request failed with key ${key.slice(0, 4)}...`,
         e.message
@@ -172,7 +186,6 @@ async function kinopoiskRequest(
     }
   }
 
-  // Graceful error handling: show clear message with instructions
   const errorMessage = lastError?.message || "Unknown error";
   const instructions =
     "Please check:\n" +
@@ -195,7 +208,6 @@ interface ParsedNote {
 }
 
 function parseNote(content: string): ParsedNote {
-  // Use Obsidian's built-in frontmatter parsing
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (match) {
     let frontmatter: Record<string, any> = {};
@@ -214,7 +226,6 @@ function serializeFrontmatter(data: Record<string, any>): string {
   for (const [key, value] of Object.entries(data)) {
     if (value === null || value === undefined) continue;
     const str = String(value);
-    // Quote strings that contain special characters
     if (
       str === "" ||
       str.includes(":") ||
@@ -232,7 +243,10 @@ function serializeFrontmatter(data: Record<string, any>): string {
   return lines.join("\n");
 }
 
-function rebuildNote(original: string, updates: Record<string, any>): string {
+function rebuildNote(
+  original: string,
+  updates: Record<string, any>
+): string {
   const { frontmatter, body } = parseNote(original);
   const merged = { ...frontmatter, ...updates };
   const fmStr = serializeFrontmatter(merged);
@@ -242,13 +256,13 @@ function rebuildNote(original: string, updates: Record<string, any>): string {
 // --- Film Selection Modal ---
 
 class FilmSelectionModal extends Modal {
-  films: FilmSearchResult[];
-  onSelect: (film: FilmSearchResult) => void;
+  films: FilmInfo[];
+  onSelect: (film: FilmInfo) => void;
 
   constructor(
     app: App,
-    films: FilmSearchResult[],
-    onSelect: (film: FilmSearchResult) => void
+    films: FilmInfo[],
+    onSelect: (film: FilmInfo) => void
   ) {
     super(app);
     this.films = films;
@@ -261,7 +275,9 @@ class FilmSelectionModal extends Modal {
     contentEl.createEl("h2", { text: "Select a film" });
 
     this.films.forEach((film) => {
-      const item = contentEl.createEl("div", { cls: "film-selection-item" });
+      const item = contentEl.createEl("div", {
+        cls: "film-selection-item",
+      });
       item.style.margin = "10px 0";
       item.style.padding = "10px";
       item.style.border = "1px solid var(--background-modifier-border)";
@@ -294,14 +310,53 @@ class FilmSelectionModal extends Modal {
   }
 }
 
+// --- Property name suggest (type-ahead + free text) ---
+
+class PropertySuggest extends AbstractInputSuggest<string> {
+  private props: string[];
+
+  constructor(app: App, inputEl: HTMLInputElement, props: string[]) {
+    super(app, inputEl);
+    this.props = props;
+  }
+
+  getSuggestions(query: string): string[] {
+    if (!query || query.trim() === "") return this.props;
+    const q = query.trim().toLowerCase();
+    return this.props.filter((p) => p.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(value: string, el: HTMLElement): void {
+    el.setText(value);
+  }
+
+  selectSuggestion(value: string, evt: MouseEvent | KeyboardEvent): void {
+    this.setValue(value);
+  }
+}
+
 // --- Plugin ---
 
 export default class KinopoiskPlugin extends Plugin {
   settings: KinopoiskPluginSettings;
 
   async onload(): Promise<void> {
-    const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    const rawData: any = (await this.loadData()) || {};
+
+    // Migrate old settings format (apiKey/apiKey2/apiKey3) to new (apiKeys[])
+    const oldKeys = [rawData.apiKey, rawData.apiKey2, rawData.apiKey3]
+      .map((k: any) => (typeof k === "string" ? k.trim() : ""))
+      .filter((k: string) => k !== "");
+    delete rawData.apiKey;
+    delete rawData.apiKey2;
+    delete rawData.apiKey3;
+
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, rawData);
+
+    if (this.settings.apiKeys.length === 0 && oldKeys.length > 0) {
+      this.settings.apiKeys = oldKeys;
+    }
+    await this.saveData(this.settings);
 
     this.addSettingTab(new KinopoiskSettingsTab(this.app, this));
 
@@ -337,6 +392,8 @@ export default class KinopoiskPlugin extends Plugin {
     // Cleanup
   }
 
+  // --- Enrich current file ---
+
   async enrichCurrentFile(): Promise<void> {
     const file = this.app.workspace.getActiveFile();
     if (!file) {
@@ -352,7 +409,6 @@ export default class KinopoiskPlugin extends Plugin {
       return;
     }
 
-    // Get film name from file name
     const filmName = file.basename;
 
     new Notice(`Searching Kinopoisk for "${filmName}"...`);
@@ -365,7 +421,6 @@ export default class KinopoiskPlugin extends Plugin {
         return;
       }
 
-      // Find best match (prefer exact name match)
       let bestFilm = searchResult.films[0];
       let foundExactMatch = false;
 
@@ -377,28 +432,22 @@ export default class KinopoiskPlugin extends Plugin {
         }
       }
 
-      // If no exact match and multiple results, show selection modal
       if (!foundExactMatch && searchResult.films.length > 1) {
-        const modal = new FilmSelectionModal(
-          this.app,
-          searchResult.films,
-          (film) => {
-            // User selected a film from the modal
-            this.processFilmSelection(film, file, filmName);
-          }
-        );
+        const modal = new FilmSelectionModal(this.app, searchResult.films, (film) => {
+          this.processFilmSelection(film, file, filmName);
+        });
         modal.open();
         return;
       }
 
-      // If exact match or only one result, process directly
       await this.processFilmSelection(bestFilm, file, filmName);
     } catch (e: any) {
-      // Graceful error handling
       new Notice(`❌ ${e.message}`, 10000);
       console.error("Kinopoisk enrichment error:", e);
     }
   }
+
+  // --- Search films ---
 
   async searchFilms(keyword: string): Promise<SearchResult> {
     const endpoint = `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(
@@ -407,8 +456,10 @@ export default class KinopoiskPlugin extends Plugin {
     return kinopoiskRequest(this.settings, endpoint);
   }
 
+  // --- Process film selection ---
+
   async processFilmSelection(
-    film: FilmSearchResult,
+    film: FilmInfo,
     file: TFile,
     filmName: string
   ): Promise<void> {
@@ -417,7 +468,6 @@ export default class KinopoiskPlugin extends Plugin {
         `Processing: "${film.nameRu}" (${film.year}). Getting details...`
       );
 
-      // Check cache first
       let detail = await getCache(this.settings, this.app, `film-${film.filmId}`);
 
       if (!detail) {
@@ -428,40 +478,52 @@ export default class KinopoiskPlugin extends Plugin {
         await setCache(this.settings, this.app, `film-${film.filmId}`, detail);
       }
 
-      // Build updates
+      const original = await this.app.vault.read(file);
+      const { frontmatter } = parseNote(original);
+
       const updates: Record<string, any> = {};
 
-      if (detail.webUrl) {
-        updates.kinopoisk = detail.webUrl;
+      for (const [fieldId, propName] of Object.entries(this.settings.mapping)) {
+        if (!propName || propName.trim() === "") continue;
+        const val = detail[fieldId as keyof FilmInfo];
+        if (val === null || val === undefined || val === "") continue;
+
+        // Check existing property
+        if (propName in frontmatter) {
+          if (!this.settings.overwriteExisting) continue; // keep existing
+        } else {
+          // Property missing in note
+          if (this.settings.missingProperty === "ignore") continue;
+        }
+
+        if (fieldId === "posterUrl" && typeof val === "string") {
+          const posterPath = `${this.settings.posterDir}/${film.filmId}.jpg`;
+          const ok = await this.downloadPoster(val, posterPath);
+          if (ok) {
+            updates[propName] = `[[${posterPath}]]`;
+          } else {
+            console.warn(`Poster download failed for film ${film.filmId}`);
+          }
+        } else {
+          updates[propName] = val;
+        }
       }
 
-      if (detail.ratingKinopoisk) {
-        updates.kp_rating = detail.ratingKinopoisk;
+      if (Object.keys(updates).length > 0) {
+        const newContent = rebuildNote(original, updates);
+        await this.app.vault.process(file, () => newContent);
       }
 
-      if (detail.description) {
-        updates.description = detail.description;
-      }
-
-      // Download poster
-      if (detail.posterUrl) {
-        const posterPath = `${this.settings.posterDir}/${film.filmId}.jpg`;
-        await this.downloadPoster(detail.posterUrl, posterPath);
-        updates.poster = `[[${posterPath}]]`;
-      }
-
-      // Write updates
-      const original = await this.app.vault.read(file);
-      const newContent = rebuildNote(original, updates);
-      await this.app.vault.process(file, () => newContent);
-
-      new Notice(`✅ Updated "${filmName}" with Kinopoisk data.`);
+      new Notice(
+        `✅ Updated "${filmName}" with Kinopoisk data.`
+      );
     } catch (e: any) {
-      // Graceful error handling
       new Notice(`❌ ${e.message}`, 10000);
       console.error("Film selection processing error:", e);
     }
   }
+
+  // --- Enrich all films ---
 
   async enrichAllFilms(): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
@@ -471,7 +533,6 @@ export default class KinopoiskPlugin extends Plugin {
       return;
     }
 
-    // Filter to film notes only
     const filmFiles: TFile[] = [];
     for (const file of files) {
       try {
@@ -516,12 +577,10 @@ export default class KinopoiskPlugin extends Plugin {
           continue;
         }
 
-        // In batch mode, take the first result (no modal)
         const bestFilm = searchResult.films[0];
         await this.processFilmSelection(bestFilm, file, filmName);
         success++;
 
-        // Small delay to avoid rate limiting
         await new Promise((resolve) => setTimeout(resolve, 500));
       } catch (e: any) {
         failed++;
@@ -534,8 +593,10 @@ export default class KinopoiskPlugin extends Plugin {
     );
   }
 
+  // --- Check quota ---
+
   async checkQuota(): Promise<void> {
-    if (!this.settings.apiKey) {
+    if (this.settings.apiKeys.length === 0) {
       new Notice("No API key configured.");
       return;
     }
@@ -543,7 +604,7 @@ export default class KinopoiskPlugin extends Plugin {
     try {
       const quota = await kinopoiskRequest(
         this.settings,
-        `/api/v1/api_keys/${this.settings.apiKey}`
+        `/api/v1/api_keys/${this.settings.apiKeys[0]}`
       );
 
       const remaining = quota.limit - quota.requestCount;
@@ -551,36 +612,71 @@ export default class KinopoiskPlugin extends Plugin {
         `Kinopoisk quota: ${quota.requestCount}/${quota.limit} used, ${remaining} remaining. Resets: ${quota.resetDateTime}`
       );
     } catch (e: any) {
-      // Graceful error handling
       new Notice(`❌ ${e.message}`, 10000);
       console.error("Quota check error:", e);
     }
   }
 
-  async downloadPoster(url: string, destPath: string): Promise<void> {
+  // --- Download poster (returns true on success) ---
+
+  async downloadPoster(url: string, destPath: string): Promise<boolean> {
     try {
+      // Check if file already exists (idempotency)
+      if (await this.app.vault.adapter.exists(destPath)) {
+        return true;
+      }
+
       // Ensure directory exists
       const dir = destPath.split("/").slice(0, -1).join("/");
       if (dir && !(await this.app.vault.adapter.exists(dir + "/"))) {
         try {
           await this.app.vault.adapter.mkdir(dir);
         } catch (e) {
-          // dir may already exist, that's fine
+          // dir may already exist
         }
       }
 
-      const response = await fetch(url);
+      const response = await requestUrl({
+        url: url,
+        method: "GET",
+        throw: false,
+      });
+
       if (!response.ok) {
         throw new Error(`Failed to download poster: ${response.status}`);
       }
 
-      const buffer = await response.arrayBuffer();
+      const buffer = await response.arrayBuffer;
       await this.app.vault.adapter.writeBinary(destPath, buffer);
+      return true;
     } catch (e: any) {
-      // Graceful error handling
       console.warn("Poster download failed:", e.message);
       new Notice(`⚠️ Poster download failed: ${e.message}`, 8000);
+      return false;
     }
+  }
+
+  // --- Collect existing property names from film notes ---
+
+  async collectPropertyNames(): Promise<string[]> {
+    const props = new Set<string>();
+    const files = this.app.vault.getMarkdownFiles();
+
+    for (const file of files) {
+      try {
+        const content = await this.app.vault.read(file);
+        const { frontmatter } = parseNote(content);
+        if (frontmatter.type === "film") {
+          for (const key of Object.keys(frontmatter)) {
+            props.add(key);
+          }
+        }
+      } catch (e) {
+        // skip unreadable files
+      }
+    }
+
+    return Array.from(props).sort();
   }
 }
 
@@ -588,6 +684,9 @@ export default class KinopoiskPlugin extends Plugin {
 
 class KinopoiskSettingsTab extends PluginSettingTab {
   plugin: KinopoiskPlugin;
+  private apiKeysContainer: HTMLElement | null = null;
+  private mappingContainer: HTMLElement | null = null;
+  private mappedProps: string[] = [];
 
   constructor(app: App, plugin: KinopoiskPlugin) {
     super(app, plugin);
@@ -598,43 +697,60 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    // --- API Keys (dynamic list) ---
+
     new Setting(containerEl)
-      .setName("Kinopoisk API Key")
+      .setName("Kinopoisk API Keys")
       .setDesc(
-        "Your Kinopoisk Unofficial API key (from kinopoiskapiunofficial.tech). Required."
+        "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403)."
+      );
+
+    this.apiKeysContainer = containerEl.createDiv({
+      cls: "kinopoisk-api-keys",
+    });
+    this.renderApiKeys();
+
+    // --- Data Mapping ---
+
+    new Setting(containerEl)
+      .setName("Data Mapping")
+      .setDesc(
+        "Select which API fields to map to note properties. For each field, choose the property name."
+      );
+
+    this.mappingContainer = containerEl.createDiv({
+      cls: "kinopoisk-mapping",
+    });
+    this.renderMapping();
+
+    // --- Behavior settings ---
+
+    new Setting(containerEl)
+      .setName("Overwrite existing properties")
+      .setDesc(
+        "If a property is already filled in the note, overwrite it with API data."
       )
-      .addText((text) => {
-        text
-          .setPlaceholder("your-api-key")
-          .setValue(this.plugin.settings.apiKey)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.overwriteExisting)
           .onChange(async (value) => {
-            this.plugin.settings.apiKey = value;
+            this.plugin.settings.overwriteExisting = value;
             await this.plugin.saveData(this.plugin.settings);
           });
       });
 
     new Setting(containerEl)
-      .setName("Secondary API Key")
-      .setDesc("Optional secondary key for rotation.")
-      .addText((text) => {
-        text
-          .setPlaceholder("secondary-key")
-          .setValue(this.plugin.settings.apiKey2)
+      .setName("Missing property behavior")
+      .setDesc(
+        "If a property does not exist in the note frontmatter: add it and fill, or do nothing."
+      )
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("add", "Add and fill")
+          .addOption("ignore", "Do nothing")
+          .setValue(this.plugin.settings.missingProperty)
           .onChange(async (value) => {
-            this.plugin.settings.apiKey2 = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Tertiary API Key")
-      .setDesc("Optional tertiary key for rotation.")
-      .addText((text) => {
-        text
-          .setPlaceholder("tertiary-key")
-          .setValue(this.plugin.settings.apiKey3)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey3 = value;
+            this.plugin.settings.missingProperty = value as "add" | "ignore";
             await this.plugin.saveData(this.plugin.settings);
           });
       });
@@ -664,5 +780,139 @@ class KinopoiskSettingsTab extends PluginSettingTab {
             await this.plugin.saveData(this.plugin.settings);
           });
       });
+  }
+
+  // --- Render dynamic API keys list ---
+
+  private renderApiKeys(): void {
+    if (!this.apiKeysContainer) return;
+    const container = this.apiKeysContainer;
+    container.empty();
+
+    this.plugin.settings.apiKeys.forEach((key, index) => {
+      new Setting(container)
+        .setName(`Key ${index + 1}`)
+        .setDesc(
+          key
+            ? `${key.slice(0, 8)}...${key.slice(-4)}`
+            : "Enter API key"
+        )
+        .addText((text) => {
+          text
+            .setPlaceholder(`api-key-${index + 1}`)
+            .setValue(key)
+            .onChange(async (value) => {
+              this.plugin.settings.apiKeys[index] = value;
+              await this.plugin.saveData(this.plugin.settings);
+              // Update the description without full re-render
+              const descEl = text.inputEl.closest(".setting-item")?.querySelector(
+                ".setting-item-description"
+              );
+              if (descEl) {
+                descEl.textContent = value
+                  ? `${value.slice(0, 8)}...${value.slice(-4)}`
+                  : "Enter API key";
+              }
+            });
+        })
+        .addExtraButton((btn) => {
+          btn
+            .setTooltip("Remove key")
+            .setButtonText("Remove")
+            .onClick(async () => {
+              this.plugin.settings.apiKeys.splice(index, 1);
+              await this.plugin.saveData(this.plugin.settings);
+              this.renderApiKeys();
+            });
+        });
+    });
+
+    // Add key button
+    new Setting(container)
+      .addButton((btn) => {
+        btn
+          .setButtonText("+ Add key")
+          .setCta()
+          .onClick(async () => {
+            this.plugin.settings.apiKeys.push("");
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderApiKeys();
+          });
+      });
+  }
+
+  // --- Render data mapping ---
+
+  private renderMapping(): void {
+    if (!this.mappingContainer) return;
+    const container = this.mappingContainer;
+    container.empty();
+    container.createEl("div", {
+      text: "Loading properties...",
+      cls: "text-muted",
+    });
+
+    this.plugin
+      .collectPropertyNames()
+      .then((props) => {
+        this.mappedProps = props;
+        this.buildMappingRows(container, props);
+      })
+      .catch((e) => {
+        container.empty();
+        container.createEl("div", {
+          text: `Failed to load property list: ${e.message}`,
+        });
+      });
+  }
+
+  private buildMappingRows(container: HTMLElement, props: string[]): void {
+    container.empty();
+    const selectedFields = Object.keys(this.plugin.settings.mapping);
+
+    API_FIELDS.forEach((field) => {
+      const isSelected = selectedFields.includes(field.id);
+
+      new Setting(container)
+        .setName(field.label)
+        .setDesc(isSelected ? "Mapped" : "Not mapped")
+        .addToggle((toggle) => {
+          toggle
+            .setValue(isSelected)
+            .onChange(async (value) => {
+              if (value) {
+                if (!this.plugin.settings.mapping[field.id]) {
+                  this.plugin.settings.mapping[field.id] = "";
+                }
+              } else {
+                delete this.plugin.settings.mapping[field.id];
+              }
+              await this.plugin.saveData(this.plugin.settings);
+              this.renderMapping();
+            });
+        });
+
+      if (isSelected) {
+        const propName = this.plugin.settings.mapping[field.id] || "";
+
+        new Setting(container)
+          .setName(`→ Property for: ${field.label}`)
+          .setDesc(
+            propName === ""
+              ? "Type a property name (existing or new)"
+              : `Property: ${propName}`
+          )
+          .addText((text) => {
+            text
+              .setPlaceholder("property-name")
+              .setValue(propName)
+              .onChange(async (value) => {
+                this.plugin.settings.mapping[field.id] = value;
+                await this.plugin.saveData(this.plugin.settings);
+              });
+            new PropertySuggest(this.app, text.inputEl, props);
+          });
+      }
+    });
   }
 }
