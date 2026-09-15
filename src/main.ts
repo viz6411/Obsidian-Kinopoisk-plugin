@@ -34,6 +34,12 @@ interface FilmInfo {
   genres: string[];
 }
 
+// The full film-detail payload (a superset of the search result). The extra
+// index signature lets us read it by a configurable field id without an `any`.
+interface FilmDetail extends FilmInfo {
+  [key: string]: unknown;
+}
+
 interface SearchResult {
   pagesCount: number;
   searchFilmsCountResult: number;
@@ -45,6 +51,11 @@ interface QuotaInfo {
   quota: number;
   requestCount: number;
   resetDateTime: string;
+}
+
+interface GitHubReleaseInfo {
+  tag_name: string;
+  id: number;
 }
 
 // --- Field mapping ---
@@ -125,7 +136,7 @@ async function getCache(
   settings: KinopoiskPluginSettings,
   app: App,
   key: string
-): Promise<any> {
+): Promise<unknown> {
   const cachePath = `${settings.cacheDir}/${key}.json`;
   try {
     if (await app.vault.adapter.exists(cachePath)) {
@@ -142,7 +153,7 @@ async function setCache(
   settings: KinopoiskPluginSettings,
   app: App,
   key: string,
-  data: any
+  data: unknown
 ): Promise<void> {
   try {
     const cachePath = `${settings.cacheDir}/${key}.json`;
@@ -162,10 +173,12 @@ async function setCache(
 
 // --- API helper with graceful error handling ---
 
+// Returns `unknown` so the API body is never treated as `any`; each caller
+// narrows it to the concrete shape it expects.
 async function kinopoiskRequest(
   settings: KinopoiskPluginSettings,
   endpoint: string
-): Promise<any> {
+): Promise<unknown> {
   const keys = settings.apiKeys.map((k) => k.trim()).filter((k) => k !== "");
 
   if (keys.length === 0) {
@@ -174,7 +187,7 @@ async function kinopoiskRequest(
     );
   }
 
-  let lastError: any = null;
+  let lastError: Error | null = null;
 
   for (const key of keys) {
     try {
@@ -196,17 +209,18 @@ async function kinopoiskRequest(
         throw new Error(`API error: ${response.status} ${endpoint}`);
       }
 
-      return response.json;
-    } catch (e: any) {
-      lastError = e;
+      // `response.json` is `any` per the Obsidian API; downcast to `unknown`.
+      return response.json as unknown;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
       console.warn(
         `Kinopoisk request failed with key ${key.slice(0, 4)}...`,
-        e.message
+        lastError.message
       );
     }
   }
 
-  const errorMessage = lastError?.message || "Unknown error";
+  const errorMessage = lastError ? lastError.message : "Unknown error";
   const instructions =
     "Please check:\n" +
     "1. Your internet connection\n" +
@@ -223,16 +237,16 @@ async function kinopoiskRequest(
 // --- Frontmatter helpers ---
 
 interface ParsedNote {
-  frontmatter: Record<string, any>;
+  frontmatter: Record<string, unknown>;
   body: string;
 }
 
 function parseNote(content: string): ParsedNote {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (match) {
-    let frontmatter: Record<string, any> = {};
+    let frontmatter: Record<string, unknown> = {};
     try {
-      frontmatter = parseYaml(match[1]) || {};
+      frontmatter = (parseYaml(match[1]) as Record<string, unknown>) || {};
     } catch (e) {
       console.warn("Failed to parse frontmatter YAML:", e);
     }
@@ -241,7 +255,7 @@ function parseNote(content: string): ParsedNote {
   return { frontmatter: {}, body: content };
 }
 
-function serializeFrontmatter(data: Record<string, any>): string {
+function serializeFrontmatter(data: Record<string, unknown>): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(data)) {
     // Preserve empty properties (e.g. "rating:") instead of dropping them.
@@ -285,10 +299,10 @@ function serializeFrontmatter(data: Record<string, any>): string {
 
 function rebuildNote(
   original: string,
-  updates: Record<string, any>
+  updates: Record<string, string>
 ): string {
   const { frontmatter, body } = parseNote(original);
-  const merged = { ...frontmatter, ...updates };
+  const merged: Record<string, unknown> = { ...frontmatter, ...updates };
   const fmStr = serializeFrontmatter(merged);
   return `---\n${fmStr}\n---\n${body}`;
 }
@@ -315,27 +329,36 @@ class FilmSelectionModal extends Modal {
     contentEl.createEl("h2", { text: "Select a film" });
 
     this.films.forEach((film) => {
+      // Layout is driven by CSS classes (added below in <style>); only the
+      // per-item box model is set here, via the sanctioned setCssStyles.
       const item = contentEl.createEl("div", {
-        cls: "film-selection-item",
+        cls: "kinopoisk-film-selection-item",
       });
-      item.style.margin = "10px 0";
-      item.style.padding = "10px";
-      item.style.border = "1px solid var(--background-modifier-border)";
-      item.style.borderRadius = "6px";
-      item.style.cursor = "pointer";
+      item.setCssStyles({
+        margin: "10px 0",
+        padding: "10px",
+        border: "1px solid var(--background-modifier-border)",
+        borderRadius: "6px",
+        cursor: "pointer",
+      });
 
       const title = item.createEl("div", {
+        cls: "kinopoisk-film-selection-title",
         text: `${film.nameRu} (${film.year})`,
       });
-      title.style.fontWeight = "600";
-      title.style.marginBottom = "5px";
+      title.setCssStyles({ fontWeight: "600", marginBottom: "5px" });
 
       if (film.description) {
-        const desc = item.createEl("div", { text: film.description });
-        desc.style.fontSize = "14px";
-        desc.style.color = "var(--text-muted)";
-        desc.style.maxHeight = "60px";
-        desc.style.overflow = "hidden";
+        const desc = item.createEl("div", {
+          cls: "kinopoisk-film-selection-desc",
+          text: film.description,
+        });
+        desc.setCssStyles({
+          fontSize: "14px",
+          color: "var(--text-muted)",
+          maxHeight: "60px",
+          overflow: "hidden",
+        });
       }
 
       item.onclick = () => {
@@ -385,12 +408,13 @@ export default class KinopoiskPlugin extends Plugin {
   settings: KinopoiskPluginSettings;
 
   async onload(): Promise<void> {
-    const rawData: any = (await this.loadData()) || {};
+    const rawData: Record<string, unknown> =
+      (await this.loadData()) || {};
 
     // Migrate old settings format (apiKey/apiKey2/apiKey3) to new (apiKeys[])
-    const oldKeys = [rawData.apiKey, rawData.apiKey2, rawData.apiKey3]
-      .map((k: any) => (typeof k === "string" ? k.trim() : ""))
-      .filter((k: string) => k !== "");
+    const oldKeys: string[] = [rawData.apiKey, rawData.apiKey2, rawData.apiKey3]
+      .map((k) => (typeof k === "string" ? k.trim() : ""))
+      .filter((k) => k !== "");
     delete rawData.apiKey;
     delete rawData.apiKey2;
     delete rawData.apiKey3;
@@ -415,7 +439,10 @@ export default class KinopoiskPlugin extends Plugin {
 
     if (this.settings.checkUpdatesOnStartup) {
       this.app.workspace.onLayoutReady(() => {
-        this.checkForUpdates(false);
+        // Fire-and-forget background check; swallow rejections.
+        this.checkForUpdates(false).catch((e) => {
+          console.warn("Startup update check failed:", e);
+        });
       });
     }
 
@@ -465,7 +492,8 @@ export default class KinopoiskPlugin extends Plugin {
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`GitHub API HTTP ${response.status}`);
       }
-      const latest = String(response.json.tag_name || "").replace(/^v/, "");
+      const release = response.json as GitHubReleaseInfo;
+      const latest = String(release.tag_name || "").replace(/^v/, "");
       if (!latest) {
         throw new Error("No release tag found");
       }
@@ -477,18 +505,19 @@ export default class KinopoiskPlugin extends Plugin {
       } else if (showResult) {
         new Notice(`✅ You are on the latest version (v${current}).`);
       }
-    } catch (e: any) {
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       if (showResult) {
-        new Notice(`⚠️ Could not check for updates: ${e.message}`, 8000);
+        new Notice(`⚠️ Could not check for updates: ${message}`, 8000);
       } else {
-        console.warn("Update check failed:", e.message);
+        console.warn("Update check failed:", message);
       }
     }
   }
 
   // --- Film note detection (configurable) ---
 
-  isFilmNote(frontmatter: Record<string, any>): boolean {
+  isFilmNote(frontmatter: Record<string, unknown>): boolean {
     const prop = (this.settings.filmNoteProperty || "").trim();
     if (prop === "") return false;
     if (!(prop in frontmatter)) return false;
@@ -520,7 +549,7 @@ export default class KinopoiskPlugin extends Plugin {
     new Notice(`Searching Kinopoisk for "${filmName}"...`);
 
     try {
-      const searchResult = await this.searchFilms(filmName);
+      const searchResult = (await this.searchFilms(filmName)) as SearchResult;
 
       if (!searchResult.films || searchResult.films.length === 0) {
         new Notice(`No films found for "${filmName}".`);
@@ -540,22 +569,26 @@ export default class KinopoiskPlugin extends Plugin {
 
       if (!foundExactMatch && searchResult.films.length > 1) {
         const modal = new FilmSelectionModal(this.app, searchResult.films, (film) => {
-          this.processFilmSelection(film, file, filmName);
+          // Handle rejections so the promise is not left floating.
+          this.processFilmSelection(film, file, filmName).catch((e) => {
+            console.error("Kinopoisk enrichment error:", e);
+          });
         });
         modal.open();
         return;
       }
 
       await this.processFilmSelection(bestFilm, file, filmName);
-    } catch (e: any) {
-      new Notice(`❌ ${e.message}`, 10000);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      new Notice(`❌ ${message}`, 10000);
       console.error("Kinopoisk enrichment error:", e);
     }
   }
 
   // --- Search films ---
 
-  async searchFilms(keyword: string): Promise<SearchResult> {
+  async searchFilms(keyword: string): Promise<unknown> {
     const endpoint = `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(
       keyword
     )}&page=1`;
@@ -574,24 +607,28 @@ export default class KinopoiskPlugin extends Plugin {
         `Processing: "${film.nameRu}" (${film.year}). Getting details...`
       );
 
-      let detail = await getCache(this.settings, this.app, `film-${film.filmId}`);
+      let detail: FilmDetail = (await getCache(
+        this.settings,
+        this.app,
+        `film-${film.filmId}`
+      )) as FilmDetail;
 
       if (!detail) {
-        detail = await kinopoiskRequest(
+        detail = (await kinopoiskRequest(
           this.settings,
           `/api/v2.2/films/${film.filmId}`
-        );
+        )) as FilmDetail;
         await setCache(this.settings, this.app, `film-${film.filmId}`, detail);
       }
 
       const original = await this.app.vault.read(file);
       const { frontmatter } = parseNote(original);
 
-      const updates: Record<string, any> = {};
+      const updates: Record<string, string> = {};
 
       for (const [fieldId, propName] of Object.entries(this.settings.mapping)) {
         if (!propName || propName.trim() === "") continue;
-        const val = detail[fieldId as keyof FilmInfo];
+        const val = detail[fieldId];
         if (val === null || val === undefined || val === "") continue;
 
         // Check existing property
@@ -611,7 +648,7 @@ export default class KinopoiskPlugin extends Plugin {
             console.warn(`Poster download failed for film ${film.filmId}`);
           }
         } else {
-          updates[propName] = val;
+          updates[propName] = String(val);
         }
       }
 
@@ -623,8 +660,9 @@ export default class KinopoiskPlugin extends Plugin {
       new Notice(
         `✅ Updated "${filmName}" with Kinopoisk data.`
       );
-    } catch (e: any) {
-      new Notice(`❌ ${e.message}`, 10000);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      new Notice(`❌ ${message}`, 10000);
       console.error("Film selection processing error:", e);
     }
   }
@@ -684,7 +722,7 @@ export default class KinopoiskPlugin extends Plugin {
         }
 
         const filmName = file.basename;
-        const searchResult = await this.searchFilms(filmName);
+        const searchResult = (await this.searchFilms(filmName)) as SearchResult;
 
         if (!searchResult.films || searchResult.films.length === 0) {
           failed++;
@@ -695,10 +733,12 @@ export default class KinopoiskPlugin extends Plugin {
         await this.processFilmSelection(bestFilm, file, filmName);
         success++;
 
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      } catch (e: any) {
+        // Popout-window-safe timer.
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      } catch (e) {
         failed++;
-        console.error(`Failed to enrich "${file.path}":`, e.message);
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`Failed to enrich "${file.path}":`, message);
       }
     }
 
@@ -716,17 +756,18 @@ export default class KinopoiskPlugin extends Plugin {
     }
 
     try {
-      const quota = await kinopoiskRequest(
+      const quota = (await kinopoiskRequest(
         this.settings,
         `/api/v1/api_keys/${this.settings.apiKeys[0]}`
-      );
+      )) as QuotaInfo;
 
       const remaining = quota.limit - quota.requestCount;
       new Notice(
         `Kinopoisk quota: ${quota.requestCount}/${quota.limit} used, ${remaining} remaining. Resets: ${quota.resetDateTime}`
       );
-    } catch (e: any) {
-      new Notice(`❌ ${e.message}`, 10000);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      new Notice(`❌ ${message}`, 10000);
       console.error("Quota check error:", e);
     }
   }
@@ -762,15 +803,18 @@ export default class KinopoiskPlugin extends Plugin {
         throw new Error(`Failed to download poster: HTTP ${response.status}`);
       }
 
-      const buffer = await response.arrayBuffer;
+      // `arrayBuffer` on RequestUrlResponsePromise is a synchronous ArrayBuffer
+      // (not a Promise), so it must not be awaited.
+      const buffer: ArrayBuffer = response.arrayBuffer;
       if (!buffer || buffer.byteLength === 0) {
         throw new Error("Failed to download poster: empty response body");
       }
       await this.app.vault.adapter.writeBinary(destPath, buffer);
       return true;
-    } catch (e: any) {
-      console.warn("Poster download failed:", e.message);
-      new Notice(`⚠️ Poster download failed: ${e.message}`, 8000);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn("Poster download failed:", message);
+      new Notice(`⚠️ Poster download failed: ${message}`, 8000);
       return false;
     }
   }
@@ -813,19 +857,32 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  // A section heading rendered as a proper Setting heading (the sanctioned
+  // pattern), followed by a muted description line.
+  private sectionHeading(
+    containerEl: HTMLElement,
+    title: string,
+    description: string
+  ): void {
+    new Setting(containerEl).setName(title).setHeading();
+    const desc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: description,
+    });
+    desc.setCssStyles({ marginTop: "-4px" });
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
 
     // --- Updates / Version ---
 
-    const updateHeader = containerEl.createEl("h3");
-    updateHeader.setText("Updates");
-    const updateDesc = containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text: `Installed version: v${this.plugin.manifest.version}`,
-    });
-    updateDesc.style.marginTop = "-4px";
+    this.sectionHeading(
+      containerEl,
+      "Updates",
+      `Installed version: v${this.plugin.manifest.version}`
+    );
 
     new Setting(containerEl)
       .setName("Check for updates")
@@ -854,14 +911,11 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // --- Film note detection ---
 
-    const filmNoteHeader = containerEl.createEl("h3");
-    filmNoteHeader.setText("Film note detection");
-    const filmNoteDesc = containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "A note is treated as a film note if it has the property below and its value equals the expected value (case-insensitive).",
-    });
-    filmNoteDesc.style.marginTop = "-4px";
+    this.sectionHeading(
+      containerEl,
+      "Film note detection",
+      "A note is treated as a film note if it has the property below and its value equals the expected value (case-insensitive)."
+    );
 
     new Setting(containerEl)
       .setName("Property name")
@@ -900,21 +954,17 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // --- Bulk actions ---
 
-    const actionsHeader = containerEl.createEl("h3");
-    actionsHeader.setText("Actions");
+    this.sectionHeading(containerEl, "Actions", "Bulk actions for your film notes.");
     this.actionContainer = containerEl.createDiv({});
     this.renderActions();
 
     // --- API Keys (dynamic list) ---
 
-    const apiKeyHeader = containerEl.createEl("h3");
-    apiKeyHeader.setText("Kinopoisk API Keys");
-    const apiKeyDesc = containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403).",
-    });
-    apiKeyDesc.style.marginTop = "-4px";
+    this.sectionHeading(
+      containerEl,
+      "Kinopoisk API Keys",
+      "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403)."
+    );
 
     this.apiKeysContainer = containerEl.createDiv({
       cls: "kinopoisk-api-keys",
@@ -923,14 +973,11 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // --- Data Mapping ---
 
-    const dataMappingHeader = containerEl.createEl("h3");
-    dataMappingHeader.setText("Data Mapping");
-    const dataMappingDesc = containerEl.createEl("p", {
-      cls: "setting-item-description",
-      text:
-        "Select which API fields to map to note properties. For each field, choose the property name.",
-    });
-    dataMappingDesc.style.marginTop = "-4px";
+    this.sectionHeading(
+      containerEl,
+      "Data Mapping",
+      "Select which API fields to map to note properties. For each field, choose the property name."
+    );
 
     this.mappingContainer = containerEl.createDiv({
       cls: "kinopoisk-mapping",
@@ -1114,8 +1161,9 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       })
       .catch((e) => {
         container.empty();
+        const message = e instanceof Error ? e.message : String(e);
         container.createEl("div", {
-          text: `Failed to load property list: ${e.message}`,
+          text: `Failed to load property list: ${message}`,
         });
       });
   }
