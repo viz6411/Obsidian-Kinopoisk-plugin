@@ -636,17 +636,22 @@ export default class KinopoiskPlugin extends Plugin {
         }
       }
 
+      // Download the poster bytes (mirrors batch_enrich.ps1: plain GET, write bytes).
+      // NOTE: Obsidian's requestUrl response has no `ok` property — check `status`.
       const response = await requestUrl({
         url: url,
         method: "GET",
         throw: false,
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to download poster: ${response.status}`);
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Failed to download poster: HTTP ${response.status}`);
       }
 
       const buffer = await response.arrayBuffer;
+      if (!buffer || buffer.byteLength === 0) {
+        throw new Error("Failed to download poster: empty response body");
+      }
       await this.app.vault.adapter.writeBinary(destPath, buffer);
       return true;
     } catch (e: any) {
