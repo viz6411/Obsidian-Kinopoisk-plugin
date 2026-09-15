@@ -82,6 +82,7 @@ interface KinopoiskPluginSettings {
   mapping: Record<string, string>;
   overwriteExisting: boolean;
   missingProperty: "add" | "ignore";
+  checkUpdatesOnStartup: boolean;
 }
 
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
@@ -97,7 +98,22 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   },
   overwriteExisting: true,
   missingProperty: "add",
+  checkUpdatesOnStartup: true,
 };
+
+// --- Update check ---
+
+const PLUGIN_REPO = "viz6411/Obsidian-Kinopoisk-plugin";
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
 
 // --- Cache helpers ---
 
@@ -380,6 +396,21 @@ export default class KinopoiskPlugin extends Plugin {
 
     this.addSettingTab(new KinopoiskSettingsTab(this.app, this));
 
+    // Command: check for updates
+    this.addCommand({
+      id: "kinopoisk-check-updates",
+      name: "Check for plugin updates",
+      callback: async () => {
+        await this.checkForUpdates(true);
+      },
+    });
+
+    if (this.settings.checkUpdatesOnStartup) {
+      this.app.workspace.onLayoutReady(() => {
+        this.checkForUpdates(false);
+      });
+    }
+
     // Command: enrich current file
     this.addCommand({
       id: "kinopoisk-enrich-current",
@@ -410,6 +441,41 @@ export default class KinopoiskPlugin extends Plugin {
 
   onunload(): void {
     // Cleanup
+  }
+
+  // --- Update check ---
+
+  async checkForUpdates(showResult: boolean): Promise<void> {
+    const current = this.manifest.version;
+    try {
+      const response = await requestUrl({
+        url: `https://api.github.com/repos/${PLUGIN_REPO}/releases/latest`,
+        method: "GET",
+        headers: { Accept: "application/vnd.github+json" },
+        throw: false,
+      });
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`GitHub API HTTP ${response.status}`);
+      }
+      const latest = String(response.json.tag_name || "").replace(/^v/, "");
+      if (!latest) {
+        throw new Error("No release tag found");
+      }
+      if (compareVersions(latest, current) > 0) {
+        new Notice(
+          ` Update available: v${latest} (you have v${current}). Get it from ${PLUGIN_REPO}/releases.`,
+          15000
+        );
+      } else if (showResult) {
+        new Notice(`✅ You are on the latest version (v${current}).`);
+      }
+    } catch (e: any) {
+      if (showResult) {
+        new Notice(`⚠️ Could not check for updates: ${e.message}`, 8000);
+      } else {
+        console.warn("Update check failed:", e.message);
+      }
+    }
   }
 
   // --- Enrich current file ---
@@ -721,6 +787,41 @@ class KinopoiskSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    // --- Updates / Version ---
+
+    const updateHeader = containerEl.createEl("h3");
+    updateHeader.setText("Updates");
+    const updateDesc = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: `Installed version: v${this.plugin.manifest.version}`,
+    });
+    updateDesc.style.marginTop = "-4px";
+
+    new Setting(containerEl)
+      .setName("Check for updates")
+      .setDesc("Query GitHub for the latest release of this plugin.")
+      .addButton((btn) => {
+        btn.setButtonText("Check now").onClick(async () => {
+          btn.setDisabled(true);
+          btn.setButtonText("Checking...");
+          await this.plugin.checkForUpdates(true);
+          btn.setButtonText("Check now");
+          btn.setDisabled(false);
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Check for updates on startup")
+      .setDesc("Automatically check GitHub for a newer release when the plugin loads.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.checkUpdatesOnStartup)
+          .onChange(async (value) => {
+            this.plugin.settings.checkUpdatesOnStartup = value;
+            await this.plugin.saveData(this.plugin.settings);
+          });
+      });
 
     // --- API Keys (dynamic list) ---
 
