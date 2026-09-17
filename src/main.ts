@@ -53,6 +53,23 @@ interface QuotaInfo {
   resetDateTime: string;
 }
 
+// --- Seasons (TV series) types ---
+// A single episode. Only `releaseDate` matters: a season counts as "released"
+// when at least one of its episodes has a non-empty release date.
+interface EpisodeInfo {
+  releaseDate: string;
+}
+
+interface SeasonInfo {
+  number: number;
+  episodes: EpisodeInfo[];
+}
+
+interface SeasonsResponse {
+  total: number;
+  items: SeasonInfo[];
+}
+
 interface GitHubReleaseInfo {
   tag_name: string;
   id: number;
@@ -87,6 +104,9 @@ const API_FIELDS: ApiFieldDef[] = [
   { id: "countries", label: "Countries" },
   { id: "genres", label: "Genres" },
   { id: "posterUrl", label: "Poster" },
+  // TV-series only (computed from the /seasons endpoint).
+  { id: "seasons", label: "Seasons (total, no pilot)" },
+  { id: "releasedSeasons", label: "Released seasons" },
 ];
 
 interface KinopoiskPluginSettings {
@@ -107,6 +127,9 @@ interface KinopoiskPluginSettings {
   filmNoteValue: string;
   serialNoteProperty: string;
   serialNoteValue: string;
+  // One-time flag: the 0.8.0 seasons-field migration has already run for this
+  // install, so a seasons field the user later disabled is not revived on load.
+  seasonsFieldsMigrated: boolean;
 }
 
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
@@ -127,6 +150,8 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
     ratingKinopoisk: "kp_rating",
     description: "description",
     posterUrl: "poster",
+    seasons: "seasons",
+    releasedSeasons: "released_seasons",
   },
   overwriteExisting: true,
   missingProperty: "add",
@@ -135,6 +160,7 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   filmNoteValue: "film",
   serialNoteProperty: "type",
   serialNoteValue: "serial",
+  seasonsFieldsMigrated: false,
 };
 
 // --- Update check ---
@@ -478,6 +504,19 @@ export default class KinopoiskPlugin extends Plugin {
       rawData.serialPosterDir = "TV_series_posters";
     }
 
+    // 0.8.0 migration: make the two TV-series-only seasons fields available in
+    // the serial mapping. Add them only when the user has never configured
+    // them (no key present) so a user who intentionally disabled a field is
+    // not reverted on next load. Idempotent once the flag is set.
+    if (!rawData.seasonsFieldsMigrated) {
+      const sm = rawData.serialMapping as Record<string, string> | null | undefined;
+      if (sm && !("seasons" in sm) && !("releasedSeasons" in sm)) {
+        sm.seasons = "seasons";
+        sm.releasedSeasons = "released_seasons";
+      }
+      rawData.seasonsFieldsMigrated = true;
+    }
+
     this.settings = Object.assign({}, DEFAULT_SETTINGS, rawData);
 
     if (this.settings.apiKeys.length === 0 && oldKeys.length > 0) {
@@ -717,6 +756,52 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
+  // --- Seasons (TV series) ---
+
+  // Fetch the seasons payload for a TV series (cached). Returns null when the
+  // series has no seasons data (e.g. a plain film) so callers can skip.
+  async fetchSeasons(filmId: string): Promise<SeasonsResponse | null> {
+    const cached = (await getCache(this.settings, this.app, `seasons-${filmId}`)) as
+      | SeasonsResponse
+      | null;
+    if (cached) return cached;
+    let data: SeasonsResponse;
+    try {
+      data = (await kinopoiskRequest(
+        this.settings,
+        `/api/v2.2/films/${filmId}/seasons`
+      )) as SeasonsResponse;
+    } catch (e) {
+      console.warn(`Seasons endpoint unavailable for ${filmId}:`, e);
+      return null;
+    }
+    if (!data || !Array.isArray(data.items)) return null;
+    await setCache(this.settings, this.app, `seasons-${filmId}`, data);
+    return data;
+  }
+
+  // Compute the two season counts per the user's definitions:
+  //   seasons            = all seasons except the pilot (number 0)
+  //   releasedSeasons    = seasons (except the pilot) that already aired,
+  //                        i.e. have at least one episode with a release date.
+  // Upcoming/scheduled seasons carry no release dates and are excluded.
+  static computeSeasonCounts(resp: SeasonsResponse): {
+    seasons: number;
+    releasedSeasons: number;
+  } {
+    let seasons = 0;
+    let releasedSeasons = 0;
+    for (const s of resp.items) {
+      if (s.number === 0) continue; // skip the pilot
+      seasons++;
+      const released = (s.episodes || []).some(
+        (e) => (e.releaseDate || "").trim() !== ""
+      );
+      if (released) releasedSeasons++;
+    }
+    return { seasons, releasedSeasons };
+  }
+
   // --- Search films/series ---
 
   async searchFilms(keyword: string): Promise<unknown> {
@@ -759,9 +844,33 @@ export default class KinopoiskPlugin extends Plugin {
       const updates: Record<string, string> = {};
       const mapping = this.mappingForType(noteType);
 
+      // TV-series only: fetch season data once and expose it as two computed
+      // fields (seasons / releasedSeasons) to the mapping loop below.
+      let seasonCounts: { seasons: number; releasedSeasons: number } | null =
+        null;
+      if (
+        noteType === "serial" &&
+        (mapping["seasons"] || mapping["releasedSeasons"])
+      ) {
+        const resp = await this.fetchSeasons(film.filmId);
+        if (resp) seasonCounts = KinopoiskPlugin.computeSeasonCounts(resp);
+      }
+
       for (const [fieldId, propName] of Object.entries(mapping)) {
         if (!propName || propName.trim() === "") continue;
-        const val = detail[fieldId];
+
+        // Resolve the value: seasons fields come from the computed counts,
+        // everything else from the film-detail payload.
+        let val: unknown;
+        if (fieldId === "seasons" || fieldId === "releasedSeasons") {
+          if (!seasonCounts) continue; // no seasons data (or film note)
+          val =
+            fieldId === "seasons"
+              ? seasonCounts.seasons
+              : seasonCounts.releasedSeasons;
+        } else {
+          val = detail[fieldId];
+        }
         if (val === null || val === undefined || val === "") continue;
 
         // Check existing property
@@ -1461,6 +1570,8 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       { title: "Text", ids: ["description", "shortDescription", "slogan"] },
       { title: "Lists", ids: ["countries", "genres"] },
       { title: "Media", ids: ["posterUrl"] },
+      // TV-series only; shown on both tabs but only meaningful for serials.
+      { title: "Seasons (serials)", ids: ["seasons", "releasedSeasons"] },
     ];
 
     for (const group of groups) {

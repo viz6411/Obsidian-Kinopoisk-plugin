@@ -11,6 +11,7 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
 - **Configurable note detection** — the plugin decides which notes are films and which are serials by a property + value pair you set for each (default: `type: film` and `type: serial`); no more hardcoded `type: film`
 - **Bulk enrichment** — enrich every film note, every serial note, or both at once from the settings page (buttons appear only when detection is configured); already-enriched notes are skipped
 - **Local posters** — downloads the poster and stores it locally: `[[Films_posters/<id>.jpg]]` for films, `[[TV_series_posters/<id>.jpg]]` for serials (directories are configurable)
+- **Seasons for TV series** — two serial-only fields computed from the `/seasons` endpoint: `seasons` (all seasons except the pilot) and `released_seasons` (only aired seasons, excluding scheduled/upcoming ones and the pilot)
 - **API key rotation** — add as many keys as you like; keys are tried in order and rotated automatically on quota exhaustion (402/403)
 - **Local API cache** — responses are cached as JSON in the vault, so re-enriching and re-opening notes does not burn quota
 - **Quota check** — one-tap notice with used/remaining requests and reset time
@@ -43,7 +44,7 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
 | **Serial note detection** | Property name + expected value that mark a note as a serial/TV series |
 | **Actions** | **Enrich all film notes** / **Enrich all serial notes** / **Enrich all film and serial notes** — bulk-enrich the matching notes (buttons are hidden until detection is configured) |
 | **Kinopoisk API Keys** | Dynamic list of keys (`+ Add key`, trash icon to remove); keys are rotated on 402/403 |
-| **Data Mapping** | Films / Serials tabs; each API field maps to a property you type (type-ahead of existing properties); empty = disabled; per-type **Reset** button |
+| **Data Mapping** | Films / Serials tabs; each API field maps to a property you type (type-ahead of existing properties); empty = disabled; per-type **Reset** button. Serials also expose the two seasons fields (`seasons`, `releasedSeasons`) — TV-series only |
 | **Overwrite existing properties** | If a property is already filled, overwrite with API data |
 | **Missing property behavior** | `Add and fill` or `Do nothing` when the property is absent |
 | **Poster directory (films)** | Where film posters are saved (vault-relative, default `Films_posters`) |
@@ -84,6 +85,9 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
    - `kp_rating` — Kinopoisk rating
    - `description` — description (multi-line, written as a YAML block scalar)
    - `poster` — `[[Films_posters/<id>.jpg]]` for films, `[[TV_series_posters/<id>.jpg]]` for serials (local embed)
+   - For **serials only**, also:
+     - `seasons` — total seasons excluding the pilot (number 0)
+     - `released_seasons` — aired seasons only (excludes the pilot and upcoming/scheduled seasons)
 5. The **Data Mapping** tabs work per note type, so a film can write to one property while a serial writes to another (e.g. films → `description`, serials → `synopsis`)
 
 ## Error handling
