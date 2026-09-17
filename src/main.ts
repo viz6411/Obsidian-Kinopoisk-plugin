@@ -70,6 +70,19 @@ interface SeasonsResponse {
   items: SeasonInfo[];
 }
 
+// A season counts as "released" (already aired) when at least one of its
+// episodes has a release date on or before the given day. Upcoming/scheduled
+// seasons only carry future (or empty) dates, so they are excluded — e.g. a
+// next season announced with a premiere date but not yet broadcast. API dates
+// are "YYYY-MM-DD"; comparing calendar days keeps this timezone-safe.
+function isReleasedDate(dateStr: string, todayKey: number): boolean {
+  const s = (dateStr || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return false;
+  const key = (+m[1]) * 10000 + (+m[2]) * 100 + (+m[3]);
+  return key <= todayKey;
+}
+
 interface GitHubReleaseInfo {
   tag_name: string;
   id: number;
@@ -782,20 +795,23 @@ export default class KinopoiskPlugin extends Plugin {
 
   // Compute the two season counts per the user's definitions:
   //   seasons            = all seasons except the pilot (number 0)
-  //   releasedSeasons    = seasons (except the pilot) that already aired,
-  //                        i.e. have at least one episode with a release date.
-  // Upcoming/scheduled seasons carry no release dates and are excluded.
+  //   releasedSeasons    = seasons (except the pilot) that have already aired,
+  //                        i.e. at least one episode with a release date on or
+  //                        before today. Upcoming/scheduled seasons carry only
+  //                        future (or empty) dates and are therefore excluded.
   static computeSeasonCounts(resp: SeasonsResponse): {
     seasons: number;
     releasedSeasons: number;
   } {
+    const now = new Date();
+    const todayKey = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
     let seasons = 0;
     let releasedSeasons = 0;
     for (const s of resp.items) {
       if (s.number === 0) continue; // skip the pilot
       seasons++;
-      const released = (s.episodes || []).some(
-        (e) => (e.releaseDate || "").trim() !== ""
+      const released = (s.episodes || []).some((e) =>
+        isReleasedDate(e.releaseDate, todayKey)
       );
       if (released) releasedSeasons++;
     }
@@ -1570,9 +1586,15 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       { title: "Text", ids: ["description", "shortDescription", "slogan"] },
       { title: "Lists", ids: ["countries", "genres"] },
       { title: "Media", ids: ["posterUrl"] },
-      // TV-series only; shown on both tabs but only meaningful for serials.
-      { title: "Seasons (serials)", ids: ["seasons", "releasedSeasons"] },
     ];
+    // TV-series only fields: shown on the Serials tab only (a film note has no
+    // seasons), so they never appear under the Films tab.
+    if (this.activeMappingType === "serial") {
+      groups.push({
+        title: "Seasons (serials)",
+        ids: ["seasons", "releasedSeasons"],
+      });
+    }
 
     for (const group of groups) {
       const heading = content.createEl("div", { text: group.title });
