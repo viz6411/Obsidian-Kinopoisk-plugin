@@ -58,6 +58,10 @@ interface GitHubReleaseInfo {
   id: number;
 }
 
+// --- Note types ---
+
+type NoteType = "film" | "serial";
+
 // --- Field mapping ---
 
 interface ApiFieldDef {
@@ -96,6 +100,8 @@ interface KinopoiskPluginSettings {
   checkUpdatesOnStartup: boolean;
   filmNoteProperty: string;
   filmNoteValue: string;
+  serialNoteProperty: string;
+  serialNoteValue: string;
 }
 
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
@@ -114,6 +120,8 @@ const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   checkUpdatesOnStartup: true,
   filmNoteProperty: "type",
   filmNoteValue: "film",
+  serialNoteProperty: "type",
+  serialNoteValue: "serial",
 };
 
 // --- Update check ---
@@ -312,21 +320,24 @@ function rebuildNote(
 class FilmSelectionModal extends Modal {
   films: FilmInfo[];
   onSelect: (film: FilmInfo) => void;
+  title: string;
 
   constructor(
     app: App,
     films: FilmInfo[],
-    onSelect: (film: FilmInfo) => void
+    onSelect: (film: FilmInfo) => void,
+    title: string
   ) {
     super(app);
     this.films = films;
     this.onSelect = onSelect;
+    this.title = title;
   }
 
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Select a film" });
+    contentEl.createEl("h2", { text: this.title });
 
     this.films.forEach((film) => {
       // Layout is driven by CSS classes (added below in <style>); only the
@@ -419,6 +430,15 @@ export default class KinopoiskPlugin extends Plugin {
     delete rawData.apiKey2;
     delete rawData.apiKey3;
 
+    // Migrate settings that only knew films: serial detection gets its own
+    // pair of fields, defaulting to type/serial when absent.
+    if (typeof rawData.serialNoteProperty !== "string") {
+      rawData.serialNoteProperty = "type";
+    }
+    if (typeof rawData.serialNoteValue !== "string") {
+      rawData.serialNoteValue = "serial";
+    }
+
     this.settings = Object.assign({}, DEFAULT_SETTINGS, rawData);
 
     if (this.settings.apiKeys.length === 0 && oldKeys.length > 0) {
@@ -446,21 +466,35 @@ export default class KinopoiskPlugin extends Plugin {
       });
     }
 
-    // Command: enrich current file
+    // Command: enrich current file (auto-detects film vs serial)
     this.addCommand({
       id: "kinopoisk-enrich-current",
-      name: "Enrich current film note from Kinopoisk",
+      name: "Enrich current note (film/serial) from Kinopoisk",
       callback: async () => {
         await this.enrichCurrentFile();
       },
     });
 
-    // Command: enrich all film notes
+    // Commands: enrich all film notes / serial notes / both
     this.addCommand({
-      id: "kinopoisk-enrich-all",
+      id: "kinopoisk-enrich-all-films",
       name: "Enrich all film notes from Kinopoisk",
       callback: async () => {
-        await this.enrichAllFilms();
+        await this.enrichAllNotes("film");
+      },
+    });
+    this.addCommand({
+      id: "kinopoisk-enrich-all-serials",
+      name: "Enrich all serial notes from Kinopoisk",
+      callback: async () => {
+        await this.enrichAllNotes("serial");
+      },
+    });
+    this.addCommand({
+      id: "kinopoisk-enrich-all",
+      name: "Enrich all film and serial notes from Kinopoisk",
+      callback: async () => {
+        await this.enrichAllNotes("all");
       },
     });
 
@@ -515,69 +549,109 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
-  // --- Film note detection (configurable) ---
+  // --- Note type detection (configurable per type) ---
 
-  isFilmNote(frontmatter: Record<string, unknown>): boolean {
-    const prop = (this.settings.filmNoteProperty || "").trim();
-    if (prop === "") return false;
-    if (!(prop in frontmatter)) return false;
-    const actual = frontmatter[prop];
-    return String(actual).toLowerCase() === this.settings.filmNoteValue.toLowerCase();
+  private matchesNote(
+    frontmatter: Record<string, unknown>,
+    prop: string,
+    value: string
+  ): boolean {
+    const p = (prop || "").trim();
+    if (p === "") return false;
+    if (!(p in frontmatter)) return false;
+    const actual = frontmatter[p];
+    return String(actual).toLowerCase() === (value || "").trim().toLowerCase();
   }
 
-  // --- Enrich current file ---
+  isFilmNote(frontmatter: Record<string, unknown>): boolean {
+    return this.matchesNote(
+      frontmatter,
+      this.settings.filmNoteProperty,
+      this.settings.filmNoteValue
+    );
+  }
+
+  isSerialNote(frontmatter: Record<string, unknown>): boolean {
+    return this.matchesNote(
+      frontmatter,
+      this.settings.serialNoteProperty,
+      this.settings.serialNoteValue
+    );
+  }
+
+  detectNoteType(frontmatter: Record<string, unknown>): NoteType | null {
+    if (this.isFilmNote(frontmatter)) return "film";
+    if (this.isSerialNote(frontmatter)) return "serial";
+    return null;
+  }
+
+  private preferApiType(t: NoteType): string {
+    return t === "serial" ? "TV_SERIES" : "FILM";
+  }
+
+  // --- Enrich current file (auto-detects film vs serial) ---
 
   async enrichCurrentFile(): Promise<void> {
     const file = this.app.workspace.getActiveFile();
     if (!file) {
-      new Notice("No active file. Open a film note first.");
+      new Notice("No active file. Open a film or serial note first.");
       return;
     }
 
     const content = await this.app.vault.read(file);
     const { frontmatter } = parseNote(content);
+    const noteType = this.detectNoteType(frontmatter);
 
-    if (!this.isFilmNote(frontmatter)) {
+    if (!noteType) {
       new Notice(
-        `This is not a film note (property "${this.settings.filmNoteProperty}" != "${this.settings.filmNoteValue}").`
+        `This is not a film or serial note (expected "${this.settings.filmNoteProperty}" == "${this.settings.filmNoteValue}" or "${this.settings.serialNoteProperty}" == "${this.settings.serialNoteValue}").`
       );
       return;
     }
 
     const filmName = file.basename;
-
-    new Notice(`Searching Kinopoisk for "${filmName}"...`);
+    new Notice(
+      `Detected ${noteType} note. Searching Kinopoisk for "${filmName}"...`
+    );
 
     try {
       const searchResult = (await this.searchFilms(filmName)) as SearchResult;
 
       if (!searchResult.films || searchResult.films.length === 0) {
-        new Notice(`No films found for "${filmName}".`);
+        new Notice(`No entries found for "${filmName}".`);
         return;
       }
 
-      let bestFilm = searchResult.films[0];
-      let foundExactMatch = false;
-
-      for (const film of searchResult.films) {
-        if (film.nameRu.toLowerCase() === filmName.toLowerCase()) {
-          bestFilm = film;
-          foundExactMatch = true;
-          break;
-        }
+      const prefer = this.preferApiType(noteType);
+      const lower = filmName.toLowerCase();
+      // Exact name match, preferring the expected API type (TV_SERIES / FILM).
+      let bestFilm = searchResult.films.find(
+        (f) => f.nameRu.toLowerCase() === lower && f.type === prefer
+      );
+      if (!bestFilm) {
+        bestFilm = searchResult.films.find(
+          (f) => f.nameRu.toLowerCase() === lower
+        );
       }
 
-      if (!foundExactMatch && searchResult.films.length > 1) {
-        const modal = new FilmSelectionModal(this.app, searchResult.films, (film) => {
-          // Handle rejections so the promise is not left floating.
-          this.processFilmSelection(film, file, filmName).catch((e) => {
-            console.error("Kinopoisk enrichment error:", e);
-          });
-        });
+      if (!bestFilm && searchResult.films.length > 1) {
+        const label = noteType === "serial" ? "serial" : "film";
+        const modal = new FilmSelectionModal(
+          this.app,
+          searchResult.films,
+          (film) => {
+            // Handle rejections so the promise is not left floating.
+            this.processFilmSelection(film, file, filmName).catch((e) => {
+              console.error("Kinopoisk enrichment error:", e);
+            });
+          },
+          `Select a ${label}`
+        );
         modal.open();
         return;
       }
 
+      if (!bestFilm) bestFilm = searchResult.films[0];
       await this.processFilmSelection(bestFilm, file, filmName);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -586,7 +660,7 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
-  // --- Search films ---
+  // --- Search films/series ---
 
   async searchFilms(keyword: string): Promise<unknown> {
     const endpoint = `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(
@@ -595,7 +669,7 @@ export default class KinopoiskPlugin extends Plugin {
     return kinopoiskRequest(this.settings, endpoint);
   }
 
-  // --- Process film selection ---
+  // --- Process film/series selection ---
 
   async processFilmSelection(
     film: FilmInfo,
@@ -657,9 +731,7 @@ export default class KinopoiskPlugin extends Plugin {
         await this.app.vault.process(file, () => newContent);
       }
 
-      new Notice(
-        `✅ Updated "${filmName}" with Kinopoisk data.`
-      );
+      new Notice(`✅ Updated "${filmName}" with Kinopoisk data.`);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       new Notice(`❌ ${message}`, 10000);
@@ -667,7 +739,7 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
-  // --- Enrich all films ---
+  // --- Enrich all notes of a given type (or both) ---
 
   /** Property used to mark a note as already enriched (mapped webUrl, fallback "kinopoisk"). */
   private enrichedMarkerProperty(): string {
@@ -675,7 +747,7 @@ export default class KinopoiskPlugin extends Plugin {
     return mapped !== "" ? mapped : "kinopoisk";
   }
 
-  async enrichAllFilms(): Promise<void> {
+  async enrichAllNotes(kind: "film" | "serial" | "all"): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
 
     if (files.length === 0) {
@@ -683,26 +755,34 @@ export default class KinopoiskPlugin extends Plugin {
       return;
     }
 
-    const filmFiles: TFile[] = [];
+    const targets: { file: TFile; type: NoteType }[] = [];
     for (const file of files) {
       try {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
-        if (this.isFilmNote(frontmatter)) {
-          filmFiles.push(file);
+        let t: NoteType | null = null;
+        if (kind === "all") {
+          t = this.detectNoteType(frontmatter);
+        } else if (kind === "film") {
+          t = this.isFilmNote(frontmatter) ? "film" : null;
+        } else {
+          t = this.isSerialNote(frontmatter) ? "serial" : null;
         }
+        if (t) targets.push({ file, type: t });
       } catch (e) {
         // skip unreadable files
       }
     }
 
-    if (filmFiles.length === 0) {
-      new Notice(`No film notes found (${this.settings.filmNoteProperty} == "${this.settings.filmNoteValue}").`);
+    if (targets.length === 0) {
+      new Notice(
+        `No notes found matching ${kind === "all" ? "film or serial" : kind} detection.`
+      );
       return;
     }
 
     new Notice(
-      `Found ${filmFiles.length} film notes. Starting enrichment...`
+      `Found ${targets.length} ${kind === "all" ? "film/serial" : kind} note(s). Starting enrichment...`
     );
 
     const markerProp = this.enrichedMarkerProperty();
@@ -711,7 +791,7 @@ export default class KinopoiskPlugin extends Plugin {
     let skipped = 0;
     let failed = 0;
 
-    for (const file of filmFiles) {
+    for (const { file, type } of targets) {
       try {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
@@ -729,7 +809,15 @@ export default class KinopoiskPlugin extends Plugin {
           continue;
         }
 
-        const bestFilm = searchResult.films[0];
+        const prefer = this.preferApiType(type);
+        const lower = filmName.toLowerCase();
+        const bestFilm =
+          searchResult.films.find(
+            (f) => f.nameRu.toLowerCase() === lower && f.type === prefer
+          ) ||
+          searchResult.films.find((f) => f.nameRu.toLowerCase() === lower) ||
+          searchResult.films[0];
+
         await this.processFilmSelection(bestFilm, file, filmName);
         success++;
 
@@ -819,7 +907,7 @@ export default class KinopoiskPlugin extends Plugin {
     }
   }
 
-  // --- Collect existing property names from film notes ---
+  // --- Collect existing property names from film and serial notes ---
 
   async collectPropertyNames(): Promise<string[]> {
     const props = new Set<string>();
@@ -829,7 +917,7 @@ export default class KinopoiskPlugin extends Plugin {
       try {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
-        if (this.isFilmNote(frontmatter)) {
+        if (this.isFilmNote(frontmatter) || this.isSerialNote(frontmatter)) {
           for (const key of Object.keys(frontmatter)) {
             props.add(key);
           }
@@ -952,9 +1040,45 @@ class KinopoiskSettingsTab extends PluginSettingTab {
           });
       });
 
+    // --- Serial note detection ---
+
+    this.sectionHeading(
+      containerEl,
+      "Serial note detection",
+      "A note is treated as a serial note if it has the property below and its value equals the expected value (case-insensitive)."
+    );
+
+    new Setting(containerEl)
+      .setName("Property name")
+      .setDesc("Frontmatter property used to detect serial notes (e.g. type).")
+      .addText((text) => {
+        text
+          .setPlaceholder("type")
+          .setValue(this.plugin.settings.serialNoteProperty)
+          .onChange(async (value) => {
+            this.plugin.settings.serialNoteProperty = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderActions();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Expected value")
+      .setDesc("Value the property must equal for the note to count as a serial (e.g. serial).")
+      .addText((text) => {
+        text
+          .setPlaceholder("serial")
+          .setValue(this.plugin.settings.serialNoteValue)
+          .onChange(async (value) => {
+            this.plugin.settings.serialNoteValue = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderActions();
+          });
+      });
+
     // --- Bulk actions ---
 
-    this.sectionHeading(containerEl, "Actions", "Bulk actions for your film notes.");
+    this.sectionHeading(containerEl, "Actions", "Bulk actions for your film and serial notes.");
     this.actionContainer = containerEl.createDiv({});
     this.renderActions();
 
@@ -1050,21 +1174,44 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     const container = this.actionContainer;
     container.empty();
 
-    const prop = (this.plugin.settings.filmNoteProperty || "").trim();
-    const val = this.plugin.settings.filmNoteValue || "";
-    const detectionConfigured = prop !== "";
+    const filmProp = (this.plugin.settings.filmNoteProperty || "").trim();
+    const serialProp = (this.plugin.settings.serialNoteProperty || "").trim();
+    const filmOk = filmProp !== "";
+    const serialOk = serialProp !== "";
 
-    if (!detectionConfigured) {
+    if (!filmOk && !serialOk) {
       container.createEl("div", {
         cls: "text-muted",
-        text: 'Actions are disabled until "Film note detection" is configured (property name must not be empty).',
+        text: 'Actions are disabled until note detection is configured (property names must not be empty).',
       });
-    } else {
+      return;
+    }
+
+    const buttons: { label: string; kind: "film" | "serial" | "all"; desc: string }[] = [];
+    if (filmOk) {
+      buttons.push({
+        label: "Enrich all film notes",
+        kind: "film",
+        desc: `Search Kinopoisk and enrich every note where "${filmProp}" == "${this.plugin.settings.filmNoteValue}" (skips notes that already have the mapped Kinopoisk URL property).`,
+      });
+    }
+    if (serialOk) {
+      buttons.push({
+        label: "Enrich all serial notes",
+        kind: "serial",
+        desc: `Search Kinopoisk and enrich every note where "${serialProp}" == "${this.plugin.settings.serialNoteValue}" (skips notes that already have the mapped Kinopoisk URL property).`,
+      });
+    }
+    buttons.push({
+      label: "Enrich all film and serial notes",
+      kind: "all",
+      desc: "Enrich every detected film and serial note in one pass (skips already-enriched notes).",
+    });
+
+    for (const b of buttons) {
       new Setting(container)
-        .setName("Enrich all film notes")
-        .setDesc(
-          `Search Kinopoisk and enrich every note where "${prop}" == "${val}" (skips notes that already have the mapped Kinopoisk URL property).`
-        )
+        .setName(b.label)
+        .setDesc(b.desc)
         .addButton((btn) => {
           btn
             .setButtonText("Enrich all")
@@ -1073,7 +1220,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
               btn.setDisabled(true);
               btn.setButtonText("Enriching…");
               try {
-                await this.plugin.enrichAllFilms();
+                await this.plugin.enrichAllNotes(b.kind);
               } finally {
                 btn.setButtonText("Enrich all");
                 btn.setDisabled(false);

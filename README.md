@@ -1,14 +1,15 @@
 # Obsidian Kinopoisk Plugin
 
-Enrich film notes with data from Kinopoisk — descriptions, ratings, posters, and links — via the [Kinopoisk Unofficial API](https://kinopoiskapiunofficial.tech).
+Enrich **film and serial (TV series) notes** with data from Kinopoisk — descriptions, ratings, posters, and links — via the [Kinopoisk Unofficial API](https://kinopoiskapiunofficial.tech).
 
 ## Features
 
 - **Search by title** — looks up the active note (or all notes) on Kinopoisk
-- **Smart match** — exact title match is preferred; on multiple candidates a modal lists name, year and short description so you can pick the right film
+- **Film and serial (TV series) support** — auto-detects whether a note is a film or a serial, and prefers the matching Kinopoisk entry type (`FILM` vs `TV_SERIES`) when matching by title
+- **Smart match** — exact title match is preferred (with the expected type first); on multiple candidates a modal lists name, year and short description so you can pick the right entry
 - **Flexible field mapping** — map any API field (`webUrl`, `nameRu`, `nameEn`, `year`, `filmLength`, `ratingKinopoisk`, `ratingImdb`, `ratingFilmCritics`, `ratingMpaa`, `description`, `shortDescription`, `slogan`, `countries`, `genres`, `posterUrl`, …) to any note property, with type-ahead suggestions of existing properties
-- **Configurable film-note detection** — the plugin decides which notes are films by a property + value pair you set (default: `type: film`); no more hardcoded `type: film`
-- **Bulk enrichment** — enrich every film note from the settings page (button appears only when detection is configured); already-enriched notes are skipped
+- **Configurable note detection** — the plugin decides which notes are films and which are serials by a property + value pair you set for each (default: `type: film` and `type: serial`); no more hardcoded `type: film`
+- **Bulk enrichment** — enrich every film note, every serial note, or both at once from the settings page (buttons appear only when detection is configured); already-enriched notes are skipped
 - **Local posters** — downloads the poster and stores `[[Films_posters/<id>.jpg]]` in the note
 - **API key rotation** — add as many keys as you like; keys are tried in order and rotated automatically on quota exhaustion (402/403)
 - **Local API cache** — responses are cached as JSON in the vault, so re-enriching and re-opening notes does not burn quota
@@ -28,9 +29,10 @@ Enrich film notes with data from Kinopoisk — descriptions, ratings, posters, a
    - Property name, e.g. `type`
    - Expected value, e.g. `film`
    - Matching is case-insensitive; a note must have the property and its value must equal the expected value
-3. **Data Mapping** — for each API field, toggle it on and choose the target property (type-ahead suggests existing properties)
-4. **Behavior** — overwrite existing values, and what to do when a property is missing from the note
-5. **Directories** — poster directory (default `Films_posters`) and cache directory (default `.kinopoisk-cache`)
+3. **Serial note detection** — same as films, for TV series (default `type` / `serial`)
+4. **Data Mapping** — for each API field, toggle it on and choose the target property (type-ahead suggests existing properties)
+5. **Behavior** — overwrite existing values, and what to do when a property is missing from the note
+6. **Directories** — poster directory (default `Films_posters`) and cache directory (default `.kinopoisk-cache`)
 
 ## Settings
 
@@ -38,7 +40,8 @@ Enrich film notes with data from Kinopoisk — descriptions, ratings, posters, a
 | --- | --- |
 | **Updates** | Installed version, **Check now** button, "check on startup" toggle |
 | **Film note detection** | Property name + expected value that mark a note as a film |
-| **Actions** | **Enrich all film notes** — bulk-enrich every matching note (button is hidden until detection is configured) |
+| **Serial note detection** | Property name + expected value that mark a note as a serial/TV series |
+| **Actions** | **Enrich all film notes** / **Enrich all serial notes** / **Enrich all film and serial notes** — bulk-enrich the matching notes (buttons are hidden until detection is configured) |
 | **Kinopoisk API Keys** | Dynamic list of keys (`+ Add key`, trash icon to remove); keys are rotated on 402/403 |
 | **Data Mapping** | Per-field toggles + target property (type-ahead of existing properties) |
 | **Overwrite existing properties** | If a property is already filled, overwrite with API data |
@@ -48,14 +51,16 @@ Enrich film notes with data from Kinopoisk — descriptions, ratings, posters, a
 
 ## Commands
 
-- **Enrich current film note from Kinopoisk** — fill the active note
+- **Enrich current note (film/serial) from Kinopoisk** — fill the active note (auto-detects film vs serial)
 - **Enrich all film notes from Kinopoisk** — batch-enrich every film note (skips notes that already have the mapped Kinopoisk URL property)
+- **Enrich all serial notes from Kinopoisk** — batch-enrich every serial/TV-series note
+- **Enrich all film and serial notes from Kinopoisk** — one pass over both types
 - **Check Kinopoisk API quota** — show used/remaining requests
 - **Check for plugin updates** — query GitHub releases and notify if a newer version exists
 
 ## Usage
 
-1. Make sure your film notes carry the detection property/value, e.g.
+1. Make sure your notes carry the detection property/value, e.g.
    ```yaml
    ---
    type: film
@@ -63,12 +68,20 @@ Enrich film notes with data from Kinopoisk — descriptions, ratings, posters, a
    rating: 8.7
    ---
    ```
-2. Set **Film note detection** in the plugin settings (property `type`, value `film`)
-3. Run **Enrich current film note** (or **Enrich all** from settings / command palette)
+   and for a TV series:
+   ```yaml
+   ---
+   type: serial
+   status: false
+   rating: 8.7
+   ---
+   ```
+2. Set **Film note detection** (property `type`, value `film`) and **Serial note detection** (property `type`, value `serial`) in the plugin settings
+3. Run **Enrich current note** (or an **Enrich all …** button from settings / the command palette)
 4. The plugin fills the mapped properties — by default:
    - `kinopoisk` — link to the Kinopoisk page
    - `kp_rating` — Kinopoisk rating
-   - `description` — film description (multi-line, written as a YAML block scalar)
+   - `description` — description (multi-line, written as a YAML block scalar)
    - `poster` — `[[Films_posters/<id>.jpg]]` local embed
 
 ## Error handling
