@@ -7,10 +7,10 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
 - **Search by title** — looks up the active note (or all notes) on Kinopoisk
 - **Film and serial (TV series) support** — auto-detects whether a note is a film or a serial, and prefers the matching Kinopoisk entry type (`FILM` vs `TV_SERIES`) when matching by title
 - **Smart match** — exact title match is preferred (with the expected type first); on multiple candidates a modal lists name, year and short description so you can pick the right entry
-- **Flexible field mapping** — map any API field (`webUrl`, `nameRu`, `nameEn`, `year`, `filmLength`, `ratingKinopoisk`, `ratingImdb`, `ratingFilmCritics`, `ratingMpaa`, `description`, `shortDescription`, `slogan`, `countries`, `genres`, `posterUrl`, …) to any note property, with type-ahead suggestions of existing properties
+- **Per-type data mapping** — films and serials have **separate** field→property mappings (tabs in settings): you can enrich films and TV series into different properties without affecting each other
 - **Configurable note detection** — the plugin decides which notes are films and which are serials by a property + value pair you set for each (default: `type: film` and `type: serial`); no more hardcoded `type: film`
 - **Bulk enrichment** — enrich every film note, every serial note, or both at once from the settings page (buttons appear only when detection is configured); already-enriched notes are skipped
-- **Local posters** — downloads the poster and stores `[[Films_posters/<id>.jpg]]` in the note
+- **Local posters** — downloads the poster and stores it locally: `[[Films_posters/<id>.jpg]]` for films, `[[TV_series_posters/<id>.jpg]]` for serials (directories are configurable)
 - **API key rotation** — add as many keys as you like; keys are tried in order and rotated automatically on quota exhaustion (402/403)
 - **Local API cache** — responses are cached as JSON in the vault, so re-enriching and re-opening notes does not burn quota
 - **Quota check** — one-tap notice with used/remaining requests and reset time
@@ -30,9 +30,9 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
    - Expected value, e.g. `film`
    - Matching is case-insensitive; a note must have the property and its value must equal the expected value
 3. **Serial note detection** — same as films, for TV series (default `type` / `serial`)
-4. **Data Mapping** — for each API field, toggle it on and choose the target property (type-ahead suggests existing properties)
+4. **Data Mapping** — separate tabs for **Films** and **Serials**; type the target property for each API field (type-ahead suggests existing properties), leave empty to disable the field
 5. **Behavior** — overwrite existing values, and what to do when a property is missing from the note
-6. **Directories** — poster directory (default `Films_posters`) and cache directory (default `.kinopoisk-cache`)
+6. **Directories** — poster directory for films (default `Films_posters`), poster directory for serials (default `TV_series_posters`), and cache directory (default `.kinopoisk-cache`)
 
 ## Settings
 
@@ -43,10 +43,11 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
 | **Serial note detection** | Property name + expected value that mark a note as a serial/TV series |
 | **Actions** | **Enrich all film notes** / **Enrich all serial notes** / **Enrich all film and serial notes** — bulk-enrich the matching notes (buttons are hidden until detection is configured) |
 | **Kinopoisk API Keys** | Dynamic list of keys (`+ Add key`, trash icon to remove); keys are rotated on 402/403 |
-| **Data Mapping** | Per-field toggles + target property (type-ahead of existing properties) |
+| **Data Mapping** | Films / Serials tabs; each API field maps to a property you type (type-ahead of existing properties); empty = disabled; per-type **Reset** button |
 | **Overwrite existing properties** | If a property is already filled, overwrite with API data |
 | **Missing property behavior** | `Add and fill` or `Do nothing` when the property is absent |
-| **Poster directory** | Where posters are saved (vault-relative) |
+| **Poster directory (films)** | Where film posters are saved (vault-relative, default `Films_posters`) |
+| **Poster directory (serials)** | Where serial/TV-series posters are saved (vault-relative, default `TV_series_posters`) |
 | **Cache directory** | Where API responses are cached (vault-relative) |
 
 ## Commands
@@ -82,7 +83,8 @@ Enrich **film and serial (TV series) notes** with data from Kinopoisk — descri
    - `kinopoisk` — link to the Kinopoisk page
    - `kp_rating` — Kinopoisk rating
    - `description` — description (multi-line, written as a YAML block scalar)
-   - `poster` — `[[Films_posters/<id>.jpg]]` local embed
+   - `poster` — `[[Films_posters/<id>.jpg]]` for films, `[[TV_series_posters/<id>.jpg]]` for serials (local embed)
+5. The **Data Mapping** tabs work per note type, so a film can write to one property while a serial writes to another (e.g. films → `description`, serials → `synopsis`)
 
 ## Error handling
 

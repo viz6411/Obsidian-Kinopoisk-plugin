@@ -92,9 +92,14 @@ const API_FIELDS: ApiFieldDef[] = [
 interface KinopoiskPluginSettings {
   apiKeys: string[];
   posterDir: string;
+  serialPosterDir: string;
   cacheDir: string;
   autoCache: boolean;
+  // Legacy shared mapping (pre-0.7). Migrated into filmMapping/serialMapping
+  // on load; kept here only so old data.json files still parse.
   mapping: Record<string, string>;
+  filmMapping: Record<string, string>;
+  serialMapping: Record<string, string>;
   overwriteExisting: boolean;
   missingProperty: "add" | "ignore";
   checkUpdatesOnStartup: boolean;
@@ -107,9 +112,17 @@ interface KinopoiskPluginSettings {
 const DEFAULT_SETTINGS: KinopoiskPluginSettings = {
   apiKeys: [],
   posterDir: "Films_posters",
+  serialPosterDir: "TV_series_posters",
   cacheDir: ".kinopoisk-cache",
   autoCache: true,
-  mapping: {
+  mapping: {},
+  filmMapping: {
+    webUrl: "kinopoisk",
+    ratingKinopoisk: "kp_rating",
+    description: "description",
+    posterUrl: "poster",
+  },
+  serialMapping: {
     webUrl: "kinopoisk",
     ratingKinopoisk: "kp_rating",
     description: "description",
@@ -439,6 +452,32 @@ export default class KinopoiskPlugin extends Plugin {
       rawData.serialNoteValue = "serial";
     }
 
+    // Migrate the legacy shared mapping into per-type mappings (0.7.0).
+    // Films keep the old mapping; serials start from the same defaults so an
+    // upgrade does not silently change serial enrichment behavior.
+    if (typeof rawData.filmMapping !== "object" || rawData.filmMapping === null) {
+      const legacy =
+        rawData.mapping && typeof rawData.mapping === "object"
+          ? (rawData.mapping as Record<string, string>)
+          : {};
+      rawData.filmMapping = legacy;
+    }
+    if (
+      typeof rawData.serialMapping !== "object" ||
+      rawData.serialMapping === null
+    ) {
+      const legacy =
+        rawData.mapping && typeof rawData.mapping === "object"
+          ? (rawData.mapping as Record<string, string>)
+          : {};
+      rawData.serialMapping = { ...DEFAULT_SETTINGS.filmMapping, ...legacy };
+    }
+    delete rawData.mapping;
+
+    if (typeof rawData.serialPosterDir !== "string") {
+      rawData.serialPosterDir = "TV_series_posters";
+    }
+
     this.settings = Object.assign({}, DEFAULT_SETTINGS, rawData);
 
     if (this.settings.apiKeys.length === 0 && oldKeys.length > 0) {
@@ -589,6 +628,22 @@ export default class KinopoiskPlugin extends Plugin {
     return t === "serial" ? "TV_SERIES" : "FILM";
   }
 
+  // --- Per-type settings accessors (films vs serials) ---
+
+  /** Field→property mapping that applies to a note of the given type. */
+  private mappingForType(t: NoteType): Record<string, string> {
+    return t === "serial"
+      ? this.settings.serialMapping
+      : this.settings.filmMapping;
+  }
+
+  /** Poster directory that applies to a note of the given type. */
+  private posterDirForType(t: NoteType): string {
+    return t === "serial"
+      ? this.settings.serialPosterDir
+      : this.settings.posterDir;
+  }
+
   // --- Enrich current file (auto-detects film vs serial) ---
 
   async enrichCurrentFile(): Promise<void> {
@@ -641,9 +696,11 @@ export default class KinopoiskPlugin extends Plugin {
           searchResult.films,
           (film) => {
             // Handle rejections so the promise is not left floating.
-            this.processFilmSelection(film, file, filmName).catch((e) => {
-              console.error("Kinopoisk enrichment error:", e);
-            });
+            this.processFilmSelection(film, file, filmName, noteType).catch(
+              (e) => {
+                console.error("Kinopoisk enrichment error:", e);
+              }
+            );
           },
           `Select a ${label}`
         );
@@ -652,7 +709,7 @@ export default class KinopoiskPlugin extends Plugin {
       }
 
       if (!bestFilm) bestFilm = searchResult.films[0];
-      await this.processFilmSelection(bestFilm, file, filmName);
+      await this.processFilmSelection(bestFilm, file, filmName, noteType);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       new Notice(`❌ ${message}`, 10000);
@@ -674,7 +731,8 @@ export default class KinopoiskPlugin extends Plugin {
   async processFilmSelection(
     film: FilmInfo,
     file: TFile,
-    filmName: string
+    filmName: string,
+    noteType: NoteType
   ): Promise<void> {
     try {
       new Notice(
@@ -699,8 +757,9 @@ export default class KinopoiskPlugin extends Plugin {
       const { frontmatter } = parseNote(original);
 
       const updates: Record<string, string> = {};
+      const mapping = this.mappingForType(noteType);
 
-      for (const [fieldId, propName] of Object.entries(this.settings.mapping)) {
+      for (const [fieldId, propName] of Object.entries(mapping)) {
         if (!propName || propName.trim() === "") continue;
         const val = detail[fieldId];
         if (val === null || val === undefined || val === "") continue;
@@ -714,7 +773,8 @@ export default class KinopoiskPlugin extends Plugin {
         }
 
         if (fieldId === "posterUrl" && typeof val === "string") {
-          const posterPath = `${this.settings.posterDir}/${film.filmId}.jpg`;
+          const posterDir = this.posterDirForType(noteType);
+          const posterPath = `${posterDir}/${film.filmId}.jpg`;
           const ok = await this.downloadPoster(val, posterPath);
           if (ok) {
             updates[propName] = `[[${posterPath}]]`;
@@ -742,8 +802,8 @@ export default class KinopoiskPlugin extends Plugin {
   // --- Enrich all notes of a given type (or both) ---
 
   /** Property used to mark a note as already enriched (mapped webUrl, fallback "kinopoisk"). */
-  private enrichedMarkerProperty(): string {
-    const mapped = (this.settings.mapping.webUrl || "").trim();
+  private enrichedMarkerProperty(t: NoteType): string {
+    const mapped = (this.mappingForType(t)["webUrl"] || "").trim();
     return mapped !== "" ? mapped : "kinopoisk";
   }
 
@@ -785,8 +845,6 @@ export default class KinopoiskPlugin extends Plugin {
       `Found ${targets.length} ${kind === "all" ? "film/serial" : kind} note(s). Starting enrichment...`
     );
 
-    const markerProp = this.enrichedMarkerProperty();
-
     let success = 0;
     let skipped = 0;
     let failed = 0;
@@ -796,7 +854,7 @@ export default class KinopoiskPlugin extends Plugin {
         const content = await this.app.vault.read(file);
         const { frontmatter } = parseNote(content);
 
-        if (frontmatter[markerProp]) {
+        if (frontmatter[this.enrichedMarkerProperty(type)]) {
           skipped++;
           continue;
         }
@@ -818,7 +876,7 @@ export default class KinopoiskPlugin extends Plugin {
           searchResult.films.find((f) => f.nameRu.toLowerCase() === lower) ||
           searchResult.films[0];
 
-        await this.processFilmSelection(bestFilm, file, filmName);
+        await this.processFilmSelection(bestFilm, file, filmName, type);
         success++;
 
         // Popout-window-safe timer.
@@ -937,6 +995,8 @@ class KinopoiskSettingsTab extends PluginSettingTab {
   plugin: KinopoiskPlugin;
   private apiKeysContainer: HTMLElement | null = null;
   private mappingContainer: HTMLElement | null = null;
+  private mappingContentEl: HTMLElement | null = null;
+  private activeMappingType: NoteType = "film";
   private actionContainer: HTMLElement | null = null;
   private mappedProps: string[] = [];
 
@@ -1095,18 +1155,18 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     });
     this.renderApiKeys();
 
-    // --- Data Mapping ---
+    // --- Data Mapping (per type: films / serials) ---
 
     this.sectionHeading(
       containerEl,
       "Data Mapping",
-      "Select which API fields to map to note properties. For each field, choose the property name."
+      "Choose which API fields to copy into your notes, separately for films and serials. Each mapped field writes to the property you pick."
     );
 
     this.mappingContainer = containerEl.createDiv({
       cls: "kinopoisk-mapping",
     });
-    this.renderMapping();
+    this.renderMappingTabs();
 
     // --- Behavior settings ---
 
@@ -1141,14 +1201,27 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Poster directory")
-      .setDesc("Directory for downloaded posters (relative to vault root).")
+      .setName("Poster directory (films)")
+      .setDesc("Directory for downloaded film posters (relative to vault root).")
       .addText((text) => {
         text
           .setPlaceholder("Films_posters")
           .setValue(this.plugin.settings.posterDir)
           .onChange(async (value) => {
             this.plugin.settings.posterDir = value;
+            await this.plugin.saveData(this.plugin.settings);
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Poster directory (serials)")
+      .setDesc("Directory for downloaded serial/TV-series posters (relative to vault root).")
+      .addText((text) => {
+        text
+          .setPlaceholder("TV_series_posters")
+          .setValue(this.plugin.settings.serialPosterDir)
+          .onChange(async (value) => {
+            this.plugin.settings.serialPosterDir = value;
             await this.plugin.saveData(this.plugin.settings);
           });
       });
@@ -1289,13 +1362,51 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       });
   }
 
-  // --- Render data mapping ---
+  // --- Render data mapping (per-type tabs: films / serials) ---
 
-  private renderMapping(): void {
+  // Field→property mapping for the currently active tab.
+  private mappingForActiveType(): Record<string, string> {
+    return this.activeMappingType === "serial"
+      ? this.plugin.settings.serialMapping
+      : this.plugin.settings.filmMapping;
+  }
+
+  private renderMappingTabs(): void {
     if (!this.mappingContainer) return;
     const container = this.mappingContainer;
     container.empty();
-    container.createEl("div", {
+
+    // Tab row: two buttons, the active one highlighted.
+    const tabRow = container.createDiv({ cls: "kinopoisk-mapping-tabs" });
+    const types: NoteType[] = ["film", "serial"];
+    for (const t of types) {
+      const label = t === "film" ? "Films" : "Serials";
+      const btn = tabRow.createEl("button", { text: label });
+      const active = t === this.activeMappingType;
+      btn.setCssStyles({
+        padding: "4px 14px",
+        borderRadius: "6px",
+        border: "1px solid var(--background-modifier-border)",
+        background: active
+          ? "var(--interactive-accent)"
+          : "var(--background-secondary)",
+        color: active
+          ? "var(--text-on-accent)"
+          : "var(--text-normal)",
+        cursor: "pointer",
+        fontSize: "13px",
+        fontWeight: active ? "600" : "500",
+        lineHeight: "1.4",
+      });
+      btn.onclick = () => {
+        this.activeMappingType = t;
+        this.renderMappingTabs();
+      };
+    }
+
+    // Content area below the tabs.
+    this.mappingContentEl = container.createDiv({});
+    this.mappingContentEl.createEl("div", {
       text: "Loading properties...",
       cls: "text-muted",
     });
@@ -1304,64 +1415,105 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       .collectPropertyNames()
       .then((props) => {
         this.mappedProps = props;
-        this.buildMappingRows(container, props);
+        this.renderMappingContent();
       })
       .catch((e) => {
-        container.empty();
+        if (!this.mappingContentEl) return;
+        this.mappingContentEl.empty();
         const message = e instanceof Error ? e.message : String(e);
-        container.createEl("div", {
+        this.mappingContentEl.createEl("div", {
           text: `Failed to load property list: ${message}`,
         });
       });
   }
 
-  private buildMappingRows(container: HTMLElement, props: string[]): void {
-    container.empty();
-    const selectedFields = Object.keys(this.plugin.settings.mapping);
+  private renderMappingContent(): void {
+    if (!this.mappingContentEl) return;
+    const content = this.mappingContentEl;
+    content.empty();
 
-    API_FIELDS.forEach((field) => {
-      const isSelected = selectedFields.includes(field.id);
+    const mapping = this.mappingForActiveType();
+    const mappedCount = Object.entries(mapping).filter(
+      ([, v]) => (v || "").trim() !== ""
+    ).length;
 
-      new Setting(container)
-        .setName(field.label)
-        .setDesc(isSelected ? "Mapped" : "Not mapped")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(isSelected)
-            .onChange(async (value) => {
-              if (value) {
-                if (!this.plugin.settings.mapping[field.id]) {
-                  this.plugin.settings.mapping[field.id] = "";
-                }
-              } else {
-                delete this.plugin.settings.mapping[field.id];
-              }
-              await this.plugin.saveData(this.plugin.settings);
-              this.renderMapping();
-            });
-        });
+    const summary = content.createEl("div", {
+      cls: "text-muted",
+      text: `${mappedCount} of ${API_FIELDS.length} fields mapped. Type a property name to map a field; leave empty to disable it.`,
+    });
+    summary.setCssStyles({ marginBottom: "8px" });
 
-      if (isSelected) {
-        const propName = this.plugin.settings.mapping[field.id] || "";
+    const groups: { title: string; ids: string[] }[] = [
+      {
+        title: "Core",
+        ids: ["webUrl", "nameRu", "nameEn", "year", "type", "filmLength"],
+      },
+      {
+        title: "Ratings",
+        ids: [
+          "ratingKinopoisk",
+          "ratingVoteCount",
+          "ratingImdb",
+          "ratingFilmCritics",
+          "ratingMpaa",
+        ],
+      },
+      { title: "Text", ids: ["description", "shortDescription", "slogan"] },
+      { title: "Lists", ids: ["countries", "genres"] },
+      { title: "Media", ids: ["posterUrl"] },
+    ];
 
-        new Setting(container)
-          .setName(`→ Property for: ${field.label}`)
-          .setDesc(
-            propName === ""
-              ? "Type a property name (existing or new)"
-              : `Property: ${propName}`
-          )
+    for (const group of groups) {
+      const heading = content.createEl("div", { text: group.title });
+      heading.setCssStyles({
+        fontSize: "12px",
+        textTransform: "uppercase",
+        letterSpacing: "0.5px",
+        color: "var(--text-muted)",
+        margin: "14px 0 4px 8px",
+      });
+      for (const id of group.ids) {
+        const field = API_FIELDS.find((f) => f.id === id);
+        if (!field) continue;
+        const current = mapping[id] || "";
+        new Setting(content)
+          .setName(field.label)
           .addText((text) => {
             text
-              .setPlaceholder("property-name")
-              .setValue(propName)
+              .setPlaceholder("off")
+              .setValue(current)
               .onChange(async (value) => {
-                this.plugin.settings.mapping[field.id] = value;
+                if (value.trim() === "") {
+                  delete mapping[id];
+                } else {
+                  mapping[id] = value;
+                }
                 await this.plugin.saveData(this.plugin.settings);
               });
-            new PropertySuggest(this.app, text.inputEl, props);
+            new PropertySuggest(this.app, text.inputEl, this.mappedProps);
           });
       }
-    });
+    }
+
+    // Reset-to-defaults button for the active type.
+    new Setting(content)
+      .setName("Reset to defaults")
+      .setDesc("Restore the default field→property mapping for this note type.")
+      .addButton((btn) => {
+        btn
+          .setButtonText("Reset")
+          .setCta()
+          .onClick(async () => {
+            const current = this.mappingForActiveType();
+            const defaultsSource =
+              this.activeMappingType === "serial"
+                ? DEFAULT_SETTINGS.serialMapping
+                : DEFAULT_SETTINGS.filmMapping;
+            for (const k of Object.keys(current)) delete current[k];
+            Object.assign(current, { ...defaultsSource });
+            await this.plugin.saveData(this.plugin.settings);
+            this.renderMappingContent();
+          });
+      });
   }
 }
