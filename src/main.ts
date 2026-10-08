@@ -6,6 +6,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  SettingDefinitionItem,
   TFile,
   parseYaml,
   requestUrl,
@@ -1145,224 +1146,191 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     desc.setCssStyles({ marginTop: "-4px" });
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
+  // Declarative settings API (Obsidian 1.13.0+). Flat settings are `control`
+  // definitions (rendered natively and indexed for settings search); the
+  // complex sections (bulk actions, dynamic API-key list, per-type data
+  // mapping) are imperative `render`/`action`/`list` definitions that reuse
+  // the existing render methods below.
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    const s = this.plugin.settings;
+    return [
+      // --- Updates ---
+      {
+        type: "group",
+        heading: "Updates",
+        items: [
+          {
+            name: "Check for updates",
+            desc: "Query GitHub for the latest release of this plugin.",
+            action: () => {
+              void this.plugin.checkForUpdates(true);
+            },
+          },
+          {
+            name: "Check for updates on startup",
+            desc: "Automatically check GitHub for a newer release when the plugin loads.",
+            control: { key: "checkUpdatesOnStartup", type: "toggle", defaultValue: true },
+          },
+        ],
+      },
+      // --- Film note detection ---
+      {
+        type: "group",
+        heading: "Film note detection",
+        desc: "A note is treated as a film note if it has the property below and its value equals the expected value (case-insensitive).",
+        items: [
+          {
+            name: "Property name",
+            desc: "Frontmatter property used to detect film notes (e.g. type).",
+            control: { key: "filmNoteProperty", type: "text", placeholder: "type", defaultValue: "type" },
+          },
+          {
+            name: "Expected value",
+            desc: "Value the property must equal for the note to count as a film (e.g. film).",
+            control: { key: "filmNoteValue", type: "text", placeholder: "film", defaultValue: "film" },
+          },
+        ],
+      },
+      // --- Serial note detection ---
+      {
+        type: "group",
+        heading: "Serial note detection",
+        items: [
+          {
+            name: "Property name",
+            desc: "Frontmatter property used to detect serial notes (e.g. type).",
+            control: { key: "serialNoteProperty", type: "text", placeholder: "type", defaultValue: "type" },
+          },
+          {
+            name: "Expected value",
+            desc: "Value the property must equal for the note to count as a serial (e.g. serial).",
+            control: { key: "serialNoteValue", type: "text", placeholder: "serial", defaultValue: "serial" },
+          },
+        ],
+      },
+      // --- Bulk actions (imperative: visibility depends on detection settings) ---
+      {
+        name: "Bulk actions",
+        desc: "Bulk actions for your film and serial notes.",
+        render: (setting) => {
+          this.actionContainer = setting.settingEl;
+          this.renderActions();
+        },
+      },
+      // --- Kinopoisk API Keys (dynamic list) ---
+      {
+        type: "list",
+        heading: "Kinopoisk API Keys",
+        items: s.apiKeys.map((key, index) => ({
+          name: `Key ${index + 1}`,
+          desc: key ? `${key.slice(0, 8)}...${key.slice(-4)}` : "Enter API key",
+          render: (setting) => {
+            setting
+              .addText((text) => {
+                text
+                  .setPlaceholder(`api-key-${index + 1}`)
+                  .setValue(key)
+                  .onChange(async (value) => {
+                    this.plugin.settings.apiKeys[index] = value;
+                    await this.plugin.saveData(this.plugin.settings);
+                    const descEl = text.inputEl.closest(".setting-item")?.querySelector(
+                      ".setting-item-description"
+                    );
+                    if (descEl) {
+                      descEl.textContent = value
+                        ? `${value.slice(0, 8)}...${value.slice(-4)}`
+                        : "Enter API key";
+                    }
+                  });
+              })
+              .addExtraButton((btn) => {
+                btn
+                  .setTooltip("Remove key")
+                  .setIcon("trash")
+                  .onClick(async () => {
+                    this.plugin.settings.apiKeys.splice(index, 1);
+                    await this.plugin.saveData(this.plugin.settings);
+                    this.update();
+                  });
+              });
+          },
+        })),
+        addItem: {
+          name: "Add key",
+          action: () => {
+            this.plugin.settings.apiKeys.push("");
+            void this.plugin.saveData(this.plugin.settings);
+            this.update();
+          },
+        },
+      },
+      // --- Data Mapping (per-type tabs: films / serials) ---
+      {
+        name: "Data Mapping",
+        desc: "Choose which API fields to copy into your notes, separately for films and serials.",
+        render: (setting) => {
+          this.mappingContainer = setting.settingEl;
+          this.renderMappingTabs();
+        },
+      },
+      // --- Behavior ---
+      {
+        type: "group",
+        heading: "Behavior",
+        items: [
+          {
+            name: "Overwrite existing properties",
+            desc: "If a property is already filled in the note, overwrite it with API data.",
+            control: { key: "overwriteExisting", type: "toggle", defaultValue: true },
+          },
+          {
+            name: "Missing property behavior",
+            desc: "If a property does not exist in the note frontmatter: add it and fill, or do nothing.",
+            control: {
+              key: "missingProperty",
+              type: "dropdown",
+              options: { add: "Add and fill", ignore: "Do nothing" },
+              defaultValue: "add",
+            },
+          },
+          {
+            name: "Poster directory (films)",
+            desc: "Directory for downloaded film posters (relative to vault root).",
+            control: { key: "posterDir", type: "text", placeholder: "Films_posters", defaultValue: "Films_posters" },
+          },
+          {
+            name: "Poster directory (serials)",
+            desc: "Directory for downloaded serial/TV-series posters (relative to vault root).",
+            control: { key: "serialPosterDir", type: "text", placeholder: "TV_series_posters", defaultValue: "TV_series_posters" },
+          },
+          {
+            name: "Cache directory",
+            desc: "Directory for API cache (relative to vault root).",
+            control: { key: "cacheDir", type: "text", placeholder: ".kinopoisk-cache", defaultValue: ".kinopoisk-cache" },
+          },
+        ],
+      },
+    ];
+  }
 
-    // --- Updates / Version ---
+  // Read a control value from the plugin settings (the conventional storage).
+  getControlValue(key: string): unknown {
+    return (this.plugin.settings as unknown as Record<string, unknown>)[key];
+  }
 
-    this.sectionHeading(
-      containerEl,
-      "Updates",
-      `Installed version: v${this.plugin.manifest.version}`
-    );
-
-    new Setting(containerEl)
-      .setName("Check for updates")
-      .setDesc("Query GitHub for the latest release of this plugin.")
-      .addButton((btn) => {
-        btn.setButtonText("Check now").onClick(async () => {
-          btn.setDisabled(true);
-          btn.setButtonText("Checking...");
-          await this.plugin.checkForUpdates(true);
-          btn.setButtonText("Check now");
-          btn.setDisabled(false);
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Check for updates on startup")
-      .setDesc("Automatically check GitHub for a newer release when the plugin loads.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.checkUpdatesOnStartup)
-          .onChange(async (value) => {
-            this.plugin.settings.checkUpdatesOnStartup = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    // --- Film note detection ---
-
-    this.sectionHeading(
-      containerEl,
-      "Film note detection",
-      "A note is treated as a film note if it has the property below and its value equals the expected value (case-insensitive)."
-    );
-
-    new Setting(containerEl)
-      .setName("Property name")
-      .setDesc("Frontmatter property used to detect film notes (e.g. type).")
-      .addText((text) => {
-        text
-          .setPlaceholder("type")
-          .setValue(this.plugin.settings.filmNoteProperty)
-          .onChange(async (value) => {
-            this.plugin.settings.filmNoteProperty = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.renderActions();
-          });
-        const suggest = new PropertySuggest(this.app, text.inputEl, []);
-        this.plugin
-          .collectPropertyNames()
-          .then((props) => suggest.setProps(props))
-          .catch(() => {
-            /* empty suggest list is acceptable */
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Expected value")
-      .setDesc("Value the property must equal for the note to count as a film (e.g. film).")
-      .addText((text) => {
-        text
-          .setPlaceholder("film")
-          .setValue(this.plugin.settings.filmNoteValue)
-          .onChange(async (value) => {
-            this.plugin.settings.filmNoteValue = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.renderActions();
-          });
-      });
-
-    // --- Serial note detection ---
-
-    this.sectionHeading(
-      containerEl,
-      "Serial note detection",
-      "A note is treated as a serial note if it has the property below and its value equals the expected value (case-insensitive)."
-    );
-
-    new Setting(containerEl)
-      .setName("Property name")
-      .setDesc("Frontmatter property used to detect serial notes (e.g. type).")
-      .addText((text) => {
-        text
-          .setPlaceholder("type")
-          .setValue(this.plugin.settings.serialNoteProperty)
-          .onChange(async (value) => {
-            this.plugin.settings.serialNoteProperty = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.renderActions();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Expected value")
-      .setDesc("Value the property must equal for the note to count as a serial (e.g. serial).")
-      .addText((text) => {
-        text
-          .setPlaceholder("serial")
-          .setValue(this.plugin.settings.serialNoteValue)
-          .onChange(async (value) => {
-            this.plugin.settings.serialNoteValue = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.renderActions();
-          });
-      });
-
-    // --- Bulk actions ---
-
-    this.sectionHeading(containerEl, "Actions", "Bulk actions for your film and serial notes.");
-    this.actionContainer = containerEl.createDiv({});
-    this.renderActions();
-
-    // --- API Keys (dynamic list) ---
-
-    this.sectionHeading(
-      containerEl,
-      "Kinopoisk API Keys",
-      "Add one or more API keys (from kinopoiskapiunofficial.tech). Keys are rotated on quota exhaustion (402/403)."
-    );
-
-    this.apiKeysContainer = containerEl.createDiv({
-      cls: "kinopoisk-api-keys",
-    });
-    this.renderApiKeys();
-
-    // --- Data Mapping (per type: films / serials) ---
-
-    this.sectionHeading(
-      containerEl,
-      "Data Mapping",
-      "Choose which API fields to copy into your notes, separately for films and serials. Each mapped field writes to the property you pick."
-    );
-
-    this.mappingContainer = containerEl.createDiv({
-      cls: "kinopoisk-mapping",
-    });
-    this.renderMappingTabs();
-
-    // --- Behavior settings ---
-
-    new Setting(containerEl)
-      .setName("Overwrite existing properties")
-      .setDesc(
-        "If a property is already filled in the note, overwrite it with API data."
-      )
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.overwriteExisting)
-          .onChange(async (value) => {
-            this.plugin.settings.overwriteExisting = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Missing property behavior")
-      .setDesc(
-        "If a property does not exist in the note frontmatter: add it and fill, or do nothing."
-      )
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption("add", "Add and fill")
-          .addOption("ignore", "Do nothing")
-          .setValue(this.plugin.settings.missingProperty)
-          .onChange(async (value) => {
-            this.plugin.settings.missingProperty = value as "add" | "ignore";
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Poster directory (films)")
-      .setDesc("Directory for downloaded film posters (relative to vault root).")
-      .addText((text) => {
-        text
-          .setPlaceholder("Films_posters")
-          .setValue(this.plugin.settings.posterDir)
-          .onChange(async (value) => {
-            this.plugin.settings.posterDir = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Poster directory (serials)")
-      .setDesc("Directory for downloaded serial/TV-series posters (relative to vault root).")
-      .addText((text) => {
-        text
-          .setPlaceholder("TV_series_posters")
-          .setValue(this.plugin.settings.serialPosterDir)
-          .onChange(async (value) => {
-            this.plugin.settings.serialPosterDir = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Cache directory")
-      .setDesc("Directory for API cache (relative to vault root).")
-      .addText((text) => {
-        text
-          .setPlaceholder(".kinopoisk-cache")
-          .setValue(this.plugin.settings.cacheDir)
-          .onChange(async (value) => {
-            this.plugin.settings.cacheDir = value;
-            await this.plugin.saveData(this.plugin.settings);
-          });
-      });
+  // Write a control value to the plugin settings and persist.
+  setControlValue(key: string, value: unknown): void {
+    (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+    // The note-detection fields drive the bulk-actions visibility.
+    if (
+      key === "filmNoteProperty" ||
+      key === "filmNoteValue" ||
+      key === "serialNoteProperty" ||
+      key === "serialNoteValue"
+    ) {
+      this.renderActions();
+    }
+    void this.plugin.saveData(this.plugin.settings);
   }
 
   // --- Render actions (bulk buttons, visibility depends on detection settings) ---
