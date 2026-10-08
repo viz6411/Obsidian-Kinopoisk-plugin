@@ -203,7 +203,7 @@ async function getCache(
       const content = await app.vault.adapter.read(cachePath);
       return JSON.parse(content);
     }
-  } catch (e) {
+  } catch {
     // cache miss is ok
   }
   return null;
@@ -221,7 +221,7 @@ async function setCache(
     if (!(await app.vault.adapter.exists(dir + "/"))) {
       try {
         await app.vault.adapter.mkdir(dir);
-      } catch (e) {
+      } catch {
         // dir may already exist
       }
     }
@@ -472,7 +472,7 @@ export default class KinopoiskPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const rawData: Record<string, unknown> =
-      (await this.loadData()) || {};
+      ((await this.loadData()) as Record<string, unknown>) || {};
 
     // Migrate old settings format (apiKey/apiKey2/apiKey3) to new (apiKeys[])
     const oldKeys: string[] = [rawData.apiKey, rawData.apiKey2, rawData.apiKey3]
@@ -954,7 +954,7 @@ export default class KinopoiskPlugin extends Plugin {
           t = this.isSerialNote(frontmatter) ? "serial" : null;
         }
         if (t) targets.push({ file, type: t });
-      } catch (e) {
+      } catch {
         // skip unreadable files
       }
     }
@@ -1057,7 +1057,7 @@ export default class KinopoiskPlugin extends Plugin {
       if (dir && !(await this.app.vault.adapter.exists(dir + "/"))) {
         try {
           await this.app.vault.adapter.mkdir(dir);
-        } catch (e) {
+        } catch {
           // dir may already exist
         }
       }
@@ -1105,7 +1105,7 @@ export default class KinopoiskPlugin extends Plugin {
             props.add(key);
           }
         }
-      } catch (e) {
+      } catch {
         // skip unreadable files
       }
     }
