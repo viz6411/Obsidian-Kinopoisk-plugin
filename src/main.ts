@@ -394,7 +394,7 @@ class FilmSelectionModal extends Modal {
     this.films.forEach((film) => {
       // Layout is driven by CSS classes (added below in <style>); only the
       // per-item box model is set here, via the sanctioned setCssStyles.
-      const item = contentEl.createEl("div", {
+      const item = contentEl.createDiv({
         cls: "kinopoisk-film-selection-item",
       });
       item.setCssStyles({
@@ -405,14 +405,14 @@ class FilmSelectionModal extends Modal {
         cursor: "pointer",
       });
 
-      const title = item.createEl("div", {
+      const title = item.createDiv({
         cls: "kinopoisk-film-selection-title",
         text: `${film.nameRu} (${film.year})`,
       });
       title.setCssStyles({ fontWeight: "600", marginBottom: "5px" });
 
       if (film.description) {
-        const desc = item.createEl("div", {
+        const desc = item.createDiv({
           cls: "kinopoisk-film-selection-desc",
           text: film.description,
         });
@@ -1378,7 +1378,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     const serialOk = serialProp !== "";
 
     if (!filmOk && !serialOk) {
-      container.createEl("div", {
+      container.createDiv({
         cls: "text-muted",
         text: 'Actions are disabled until note detection is configured (property names must not be empty).',
       });
@@ -1531,7 +1531,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
 
     // Content area below the tabs.
     this.mappingContentEl = container.createDiv({});
-    this.mappingContentEl.createEl("div", {
+    this.mappingContentEl.createDiv({
       text: "Loading properties...",
       cls: "text-muted",
     });
@@ -1546,7 +1546,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
         if (!this.mappingContentEl) return;
         this.mappingContentEl.empty();
         const message = e instanceof Error ? e.message : String(e);
-        this.mappingContentEl.createEl("div", {
+        this.mappingContentEl.createDiv({
           text: `Failed to load property list: ${message}`,
         });
       });
@@ -1562,7 +1562,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
       ([, v]) => (v || "").trim() !== ""
     ).length;
 
-    const summary = content.createEl("div", {
+    const summary = content.createDiv({
       cls: "text-muted",
       text: `${mappedCount} of ${API_FIELDS.length} fields mapped. Type a property name to map a field; leave empty to disable it.`,
     });
@@ -1597,7 +1597,7 @@ class KinopoiskSettingsTab extends PluginSettingTab {
     }
 
     for (const group of groups) {
-      const heading = content.createEl("div", { text: group.title });
+      const heading = content.createDiv({ text: group.title });
       heading.setCssStyles({
         fontSize: "12px",
         textTransform: "uppercase",
