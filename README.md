@@ -1,4 +1,4 @@
-# Obsidian Kinopoisk Plugin
+# Kinopoisk Film Enricher
 
 Enrich **film and serial (TV series) notes** with data from Kinopoisk — descriptions, ratings, posters, and links — via the [Kinopoisk Unofficial API](https://kinopoiskapiunofficial.tech).
 
