@@ -408,7 +408,7 @@ class FilmSelectionModal extends Modal {
 
       const title = item.createDiv({
         cls: "kinopoisk-film-selection-title",
-        text: `${film.nameRu} (${film.year})`,
+        text: `${film.nameRu || film.nameEn || "Без названия"} (${film.year})`,
       });
       title.setCssStyles({ fontWeight: "600", marginBottom: "5px" });
 
@@ -733,12 +733,13 @@ export default class KinopoiskPlugin extends Plugin {
       const prefer = this.preferApiType(noteType);
       const lower = filmName.toLowerCase();
       // Exact name match, preferring the expected API type (TV_SERIES / FILM).
+      // (nameRu can be undefined for some API results — guard against it.)
       let bestFilm = searchResult.films.find(
-        (f) => f.nameRu.toLowerCase() === lower && f.type === prefer
+        (f) => (f.nameRu || "").toLowerCase() === lower && f.type === prefer
       );
       if (!bestFilm) {
         bestFilm = searchResult.films.find(
-          (f) => f.nameRu.toLowerCase() === lower
+          (f) => (f.nameRu || "").toLowerCase() === lower
         );
       }
 
@@ -838,7 +839,7 @@ export default class KinopoiskPlugin extends Plugin {
   ): Promise<void> {
     try {
       new Notice(
-        `Processing: "${film.nameRu}" (${film.year}). Getting details...`
+        `Processing: "${film.nameRu || film.nameEn || "Без названия"}" (${film.year}). Getting details...`
       );
 
       let detail: FilmDetail = (await getCache(
@@ -997,9 +998,11 @@ export default class KinopoiskPlugin extends Plugin {
         const lower = filmName.toLowerCase();
         const bestFilm =
           searchResult.films.find(
-            (f) => f.nameRu.toLowerCase() === lower && f.type === prefer
+            (f) => (f.nameRu || "").toLowerCase() === lower && f.type === prefer
           ) ||
-          searchResult.films.find((f) => f.nameRu.toLowerCase() === lower) ||
+          searchResult.films.find(
+            (f) => (f.nameRu || "").toLowerCase() === lower
+          ) ||
           searchResult.films[0];
 
         await this.processFilmSelection(bestFilm, file, filmName, type);
